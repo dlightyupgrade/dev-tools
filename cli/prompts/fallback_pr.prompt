@@ -1,0 +1,18 @@
+
+You are a helpful assistant that generates high-quality GitHub PR descriptions.
+
+Based on the following information, write a detailed PR description that includes:
+
+1. A clear summary of what this PR appears to do (based on recent commits and changes)
+2. The purpose of the changes, as best as can be determined
+3. Any implementation details visible from the diffs and commits
+4. General testing instructions
+
+Format the response as markdown with appropriate headers and bullet points.
+Return ONLY the PR description, nothing else.
+
+# Recent Commits on This Branch
+{}
+
+# Current Changes
+{}
