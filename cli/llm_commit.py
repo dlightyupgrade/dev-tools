@@ -23,6 +23,13 @@ Options:
                         - concise: Single line brief summary
                         - detailed: Full commit with description
   -p, --prefix          Add a ticket ID prefix from the branch name (e.g., SI-1234)
+  --push                Automatically push changes after commit
+  -y, --yes             Skip confirmation prompts and commit directly
+
+By default, the tool will:
+  1. Generate a commit message based on staged changes
+  2. Ask for confirmation before committing
+  3. Ask if you want to push the changes after committing
 
 Requirements:
   - Git installed and available in PATH
@@ -268,14 +275,52 @@ def edit_message(message):
     os.unlink(tf_name)
     return edited_message
 
-def create_commit(message):
+def create_commit(message, auto_push=False):
     """Create a git commit with the generated message"""
+    # Ask for confirmation
+    print_colored("\nReady to commit with message:", GREEN)
+    print(f"{BOLD}{message}{ENDC}")
+    
+    choice = input("\nCreate commit? [Y/n]: ")
+    if choice.lower() == 'n':
+        print_colored("Commit cancelled.", YELLOW)
+        return
+    
     result = run(["git", "commit", "-m", message], stdout=PIPE, stderr=PIPE, text=True)
     if result.returncode != 0:
         print_colored(f"Error creating commit: {result.stderr}", RED)
         sys.exit(1)
     
     print_colored("\nCommit created successfully:", GREEN)
+    print(result.stdout)
+    
+    # Ask if user wants to push
+    if auto_push:
+        push_changes()
+    else:
+        choice = input("\nPush changes to remote? [y/N]: ")
+        if choice.lower() == 'y':
+            push_changes()
+
+def push_changes():
+    """Push changes to remote repository"""
+    print_colored("\nPushing changes to remote...", BLUE)
+    
+    # Get the current branch
+    branch_result = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], stdout=PIPE, stderr=PIPE, text=True)
+    if branch_result.returncode != 0:
+        print_colored(f"Error getting current branch: {branch_result.stderr}", RED)
+        return
+    
+    current_branch = branch_result.stdout.strip()
+    
+    # Push changes
+    result = run(["git", "push", "origin", current_branch], stdout=PIPE, stderr=PIPE, text=True)
+    if result.returncode != 0:
+        print_colored(f"Error pushing changes: {result.stderr}", RED)
+        return
+    
+    print_colored("\nChanges pushed successfully:", GREEN)
     print(result.stdout)
 
 def main():
@@ -293,6 +338,10 @@ def main():
                       help='Commit message style (default: conventional, compact=ultra short)')
     parser.add_argument('-p', '--prefix', action='store_true',
                       help='Add a ticket ID prefix from the branch name')
+    parser.add_argument('--push', action='store_true',
+                      help='Automatically push changes after commit')
+    parser.add_argument('-y', '--yes', action='store_true',
+                      help='Skip confirmation prompts and commit directly')
     
     args = parser.parse_args()
     
@@ -342,8 +391,23 @@ def main():
         
         # Create commit if not dry-run
         if not args.dry_run:
-            print_colored("\nCreating commit...", BLUE)
-            create_commit(message)
+            if args.yes:
+                # Skip confirmation and commit directly
+                print_colored("\nCreating commit...", BLUE)
+                result = run(["git", "commit", "-m", message], stdout=PIPE, stderr=PIPE, text=True)
+                if result.returncode != 0:
+                    print_colored(f"Error creating commit: {result.stderr}", RED)
+                    sys.exit(1)
+                
+                print_colored("\nCommit created successfully:", GREEN)
+                print(result.stdout)
+                
+                # Push if requested
+                if args.push:
+                    push_changes()
+            else:
+                # Use interactive commit with confirmation
+                create_commit(message, args.push)
         else:
             print_colored("\nDry run - no commit created", YELLOW)
     

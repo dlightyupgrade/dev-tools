@@ -8,6 +8,8 @@ A collection of tools that use local LLM (via Ollama) to improve Git workflows w
 - Create high-quality PR descriptions from commit history
 - Works completely offline with local LLM models
 - Multiple style options for commit messages
+- Interactive commit workflow with confirmation prompts
+- One-step commit and push functionality
 - Integration with GitHub CLI for PR creation
 
 ## Requirements
@@ -63,6 +65,15 @@ llm_commit s
 
 # Add prefix with ticket ID from branch name
 llm_commit --prefix
+
+# Skip confirmation prompts and commit directly
+llm_commit --yes
+
+# Automatically push changes after commit
+llm_commit --push
+
+# Skip confirmations and auto-push (for quick CI fixes)
+llm_commit --yes --push
 
 # See all options
 llm_commit --help
