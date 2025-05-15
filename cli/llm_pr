@@ -104,6 +104,29 @@ if [ "$CURRENT_BRANCH" == "$BASE_BRANCH" ]; then
   exit 1
 fi
 
+# Check if the base branch exists locally, if not try to fetch it
+if ! git rev-parse --verify --quiet "$BASE_BRANCH" &>/dev/null; then
+  echo -e "${YELLOW}Base branch '$BASE_BRANCH' not found locally. Attempting to fetch from remote...${ENDC}"
+  
+  # Try to get the default remote name
+  DEFAULT_REMOTE=$(git remote | head -n 1)
+  if [ -z "$DEFAULT_REMOTE" ]; then
+    echo -e "${RED}No remote repository configured. Please add a remote or specify an existing local branch.${ENDC}"
+    exit 1
+  fi
+  
+  # Try to fetch the branch from remote
+  echo -e "${BLUE}Fetching '$BASE_BRANCH' from remote '$DEFAULT_REMOTE'...${ENDC}"
+  if ! git fetch "$DEFAULT_REMOTE" "$BASE_BRANCH":"$BASE_BRANCH" &>/dev/null; then
+    echo -e "${RED}Failed to fetch '$BASE_BRANCH' from remote. Creating PR without commit history.${ENDC}"
+    
+    # Set a flag to skip commit history processing
+    SKIP_COMMIT_HISTORY=true
+  else
+    echo -e "${GREEN}Successfully fetched '$BASE_BRANCH' from remote.${ENDC}"
+  fi
+fi
+
 # Extract ticket ID from branch name
 extract_ticket_from_branch() {
   # Look for common ticket formats (e.g., SI-1234, JIRA-5678, ABC-901)
@@ -131,25 +154,59 @@ echo -e "${BLUE}Generating PR description for branch: ${BOLD}$CURRENT_BRANCH${EN
 echo -e "${BLUE}Base branch: ${BOLD}$BASE_BRANCH${ENDC}"
 echo -e "${BLUE}PR Title: ${BOLD}$PR_TITLE${ENDC}"
 
-# Get all commits between the current branch and the base branch
-COMMITS=$(git log --reverse "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:"%h %s")
-COMMIT_DETAILS=$(git log --reverse "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:"%h %s%n%b" --name-status)
+# Initialize variables for commits and diff summary
+COMMITS=""
+COMMIT_DETAILS=""
+DIFF_SUMMARY=""
 
-if [ -z "$COMMITS" ]; then
-  echo -e "${YELLOW}No commits found between $CURRENT_BRANCH and $BASE_BRANCH.${ENDC}"
-  echo -e "${YELLOW}Make sure you have committed your changes.${ENDC}"
-  exit 1
+# If we're not skipping commit history, try to get commits between branches
+if [ "${SKIP_COMMIT_HISTORY:-false}" != "true" ]; then
+  # Get all commits between the current branch and the base branch
+  COMMITS=$(git log --reverse "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:"%h %s" 2>/dev/null)
+  COMMIT_DETAILS=$(git log --reverse "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:"%h %s%n%b" --name-status 2>/dev/null)
+  
+  # Get the diff summary
+  DIFF_SUMMARY=$(git diff --stat "$BASE_BRANCH".."$CURRENT_BRANCH" 2>/dev/null)
+  
+  if [ -z "$COMMITS" ]; then
+    echo -e "${YELLOW}No commits found between $CURRENT_BRANCH and $BASE_BRANCH.${ENDC}"
+    echo -e "${YELLOW}Falling back to most recent commits on this branch.${ENDC}"
+    SKIP_COMMIT_HISTORY=true
+  fi
 fi
 
-# Get the diff summary
-DIFF_SUMMARY=$(git diff --stat "$BASE_BRANCH".."$CURRENT_BRANCH")
+# If no commit history from comparison with base branch, fall back to recent commits
+if [ "${SKIP_COMMIT_HISTORY:-false}" = "true" ]; then
+  echo -e "${BLUE}Using recent commits and staged changes for PR description...${ENDC}"
+  
+  # Get recent commits on current branch (last 10)
+  COMMITS=$(git log -10 --pretty=format:"%h %s" 2>/dev/null)
+  COMMIT_DETAILS=$(git log -10 --pretty=format:"%h %s%n%b" --name-status 2>/dev/null)
+  
+  # Get staged and unstaged changes
+  DIFF_SUMMARY=$(git diff --stat 2>/dev/null)
+  STAGED_DIFF=$(git diff --staged --stat 2>/dev/null)
+  
+  if [ -n "$STAGED_DIFF" ]; then
+    DIFF_SUMMARY="$DIFF_SUMMARY\n\nStaged changes:\n$STAGED_DIFF"
+  fi
+  
+  if [ -z "$COMMITS" ] && [ -z "$DIFF_SUMMARY" ]; then
+    echo -e "${RED}No commits or changes found. Cannot generate PR description.${ENDC}"
+    exit 1
+  fi
+fi
 
 if [ "$VERBOSE" = true ]; then
-  echo -e "${BLUE}Commits between $BASE_BRANCH and $CURRENT_BRANCH:${ENDC}"
+  if [ "${SKIP_COMMIT_HISTORY:-false}" = "true" ]; then
+    echo -e "${BLUE}Recent commits on current branch:${ENDC}"
+  else
+    echo -e "${BLUE}Commits between $BASE_BRANCH and $CURRENT_BRANCH:${ENDC}"
+  fi
   echo "$COMMIT_DETAILS"
   echo ""
   echo -e "${BLUE}Diff summary:${ENDC}"
-  echo "$DIFF_SUMMARY"
+  echo -e "$DIFF_SUMMARY"
   echo ""
 fi
 
@@ -157,7 +214,30 @@ fi
 PROMPT_FILE=$(mktemp)
 
 # Create the prompt
-cat > "$PROMPT_FILE" << EOF
+if [ "${SKIP_COMMIT_HISTORY:-false}" = "true" ]; then
+  # Different prompt when we don't have proper commit history
+  cat > "$PROMPT_FILE" << EOF
+You are a helpful assistant that generates high-quality GitHub PR descriptions.
+
+Based on the following information, write a detailed PR description that includes:
+
+1. A clear summary of what this PR appears to do (based on recent commits and changes)
+2. The purpose of the changes, as best as can be determined
+3. Any implementation details visible from the diffs and commits
+4. General testing instructions
+
+Format the response as markdown with appropriate headers and bullet points.
+Return ONLY the PR description, nothing else.
+
+# Recent Commits on This Branch
+$COMMIT_DETAILS
+
+# Current Changes
+$DIFF_SUMMARY
+EOF
+else
+  # Standard prompt with commit history
+  cat > "$PROMPT_FILE" << EOF
 You are a helpful assistant that generates high-quality GitHub PR descriptions.
 
 Based on the following commits and changes, write a detailed PR description that includes:
@@ -176,6 +256,7 @@ $COMMIT_DETAILS
 # Diff Summary
 $DIFF_SUMMARY
 EOF
+fi
 
 if [ "$VERBOSE" = true ]; then
   echo -e "${BLUE}Prompt:${ENDC}"

@@ -404,19 +404,61 @@ def create_pr(model=DEFAULT_MODEL, edit=False, base_branch="main"):
     
     print_colored(f"Running: {' '.join(cmd)}", BLUE)
     
+    # First, make sure the base branch exists or can be fetched
+    check_base_branch(base_branch)
+    
     # Run the llm_pr script
     try:
-        pr_process = subprocess.Popen(cmd)
-        pr_process.wait()
+        # Use subprocess.run with text=True for better error handling
+        pr_result = subprocess.run(cmd, capture_output=True, text=True)
         
-        if pr_process.returncode != 0:
-            print_colored("Error creating PR. Check the output above for details.", RED)
+        # Print the output regardless of success/failure
+        if pr_result.stdout:
+            print(pr_result.stdout)
+        
+        if pr_result.returncode != 0:
+            if pr_result.stderr:
+                print_colored(f"Error output from PR creation:", RED)
+                print(pr_result.stderr)
+            print_colored("Error creating PR. See details above.", RED)
             return False
         
         return True
     except Exception as e:
         print_colored(f"Error creating PR: {e}", RED)
         return False
+
+def check_base_branch(base_branch):
+    """Check if base branch exists, try to fetch it if not"""
+    # Check if branch exists locally
+    check_result = run(["git", "rev-parse", "--verify", "--quiet", base_branch], 
+                     stdout=PIPE, stderr=PIPE)
+    
+    if check_result.returncode != 0:
+        print_colored(f"Base branch '{base_branch}' not found locally. Attempting to fetch...", YELLOW)
+        
+        # Try to get default remote
+        remote_result = run(["git", "remote"], stdout=PIPE, stderr=PIPE, text=True)
+        
+        if remote_result.returncode != 0 or not remote_result.stdout.strip():
+            print_colored("No remote repository found. Please add a remote first.", RED)
+            return False
+        
+        default_remote = remote_result.stdout.strip().split("\n")[0]
+        
+        # Try to fetch the branch
+        fetch_cmd = ["git", "fetch", default_remote, f"{base_branch}:{base_branch}"]
+        fetch_result = run(fetch_cmd, stdout=PIPE, stderr=PIPE, text=True)
+        
+        if fetch_result.returncode == 0:
+            print_colored(f"Successfully fetched '{base_branch}' from remote.", GREEN)
+            return True
+        else:
+            print_colored(f"Could not fetch '{base_branch}' from remote. PR may have limited context.", YELLOW)
+            print_colored("PR creation will continue, but may not include complete commit history.", YELLOW)
+            return False
+    
+    return True
 
 def main():
     parser = argparse.ArgumentParser(description='Generate git commit messages using a local LLM')
