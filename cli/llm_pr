@@ -1,0 +1,233 @@
+#!/bin/bash
+# Local LLM GitHub PR Assistant
+# 
+# This script uses a local LLM (via Ollama) to generate PR descriptions
+# based on git commit history between the current branch and the base branch.
+
+set -e
+
+# ANSI color codes
+BLUE="\033[94m"
+GREEN="\033[92m"
+YELLOW="\033[93m"
+RED="\033[91m"
+ENDC="\033[0m"
+BOLD="\033[1m"
+
+# Default values
+MODEL="phi3:mini"
+EDIT=false
+DRY_RUN=false
+VERBOSE=false
+BASE_BRANCH="main"
+
+# Find the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Function to print help
+print_help() {
+  echo "Usage: llm_pr [options]"
+  echo ""
+  echo "Options:"
+  echo "  -h, --help            Show this help message and exit"
+  echo "  -m, --model MODEL     Specify the Ollama model to use (default: phi3:mini)"
+  echo "  -e, --edit            Edit the generated PR description before submitting"
+  echo "  -d, --dry-run         Show the generated PR description without submitting"
+  echo "  -v, --verbose         Show verbose output including commits and prompt"
+  echo "  -b, --base BRANCH     Base branch to compare against (default: main)"
+  echo "  -t, --title TITLE     Custom PR title (optional)"
+  echo ""
+  echo "Requirements:"
+  echo "  - Git installed and available in PATH"
+  echo "  - GitHub CLI (gh) installed and authenticated"
+  echo "  - Ollama installed and running"
+  echo "  - Python 3.6+"
+  exit 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)
+      print_help
+      ;;
+    -m|--model)
+      MODEL="$2"
+      shift 2
+      ;;
+    -e|--edit)
+      EDIT=true
+      shift
+      ;;
+    -d|--dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    -v|--verbose)
+      VERBOSE=true
+      shift
+      ;;
+    -b|--base)
+      BASE_BRANCH="$2"
+      shift 2
+      ;;
+    -t|--title)
+      PR_TITLE="$2"
+      shift 2
+      ;;
+    *)
+      echo -e "${RED}Error: Unknown option $1${ENDC}"
+      print_help
+      ;;
+  esac
+done
+
+# Check if ollama is running
+if ! curl -s http://localhost:11434/api/tags &>/dev/null; then
+  echo -e "${RED}Error: Ollama server is not running.${ENDC}"
+  echo -e "${YELLOW}Start it with: 'ollama serve'${ENDC}"
+  exit 1
+fi
+
+# Check if gh is installed
+if ! command -v gh &> /dev/null; then
+  echo -e "${RED}Error: GitHub CLI (gh) is not installed.${ENDC}"
+  echo -e "${YELLOW}Install it from: https://cli.github.com/${ENDC}"
+  exit 1
+fi
+
+# Get current branch
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$CURRENT_BRANCH" == "$BASE_BRANCH" ]; then
+  echo -e "${YELLOW}Warning: You are currently on the $BASE_BRANCH branch.${ENDC}"
+  echo -e "${YELLOW}Please switch to a feature branch to create a PR.${ENDC}"
+  exit 1
+fi
+
+# Extract ticket ID from branch name
+extract_ticket_from_branch() {
+  # Look for common ticket formats (e.g., SI-1234, JIRA-5678, ABC-901)
+  if [[ $CURRENT_BRANCH =~ ([A-Z]+-[0-9]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  elif [[ $CURRENT_BRANCH =~ nojira ]]; then
+    echo "NOJIRA"
+  else
+    echo ""
+  fi
+}
+
+TICKET_ID=$(extract_ticket_from_branch)
+
+# If PR_TITLE is not set, generate one from the latest commit
+if [ -z "$PR_TITLE" ]; then
+  if [ -n "$TICKET_ID" ]; then
+    PR_TITLE="$TICKET_ID: $(git log -1 --pretty=%s | sed -E "s/^($TICKET_ID: |$TICKET_ID )//i")"
+  else
+    PR_TITLE=$(git log -1 --pretty=%s)
+  fi
+fi
+
+echo -e "${BLUE}Generating PR description for branch: ${BOLD}$CURRENT_BRANCH${ENDC}"
+echo -e "${BLUE}Base branch: ${BOLD}$BASE_BRANCH${ENDC}"
+echo -e "${BLUE}PR Title: ${BOLD}$PR_TITLE${ENDC}"
+
+# Get all commits between the current branch and the base branch
+COMMITS=$(git log --reverse "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:"%h %s")
+COMMIT_DETAILS=$(git log --reverse "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:"%h %s%n%b" --name-status)
+
+if [ -z "$COMMITS" ]; then
+  echo -e "${YELLOW}No commits found between $CURRENT_BRANCH and $BASE_BRANCH.${ENDC}"
+  echo -e "${YELLOW}Make sure you have committed your changes.${ENDC}"
+  exit 1
+fi
+
+# Get the diff summary
+DIFF_SUMMARY=$(git diff --stat "$BASE_BRANCH".."$CURRENT_BRANCH")
+
+if [ "$VERBOSE" = true ]; then
+  echo -e "${BLUE}Commits between $BASE_BRANCH and $CURRENT_BRANCH:${ENDC}"
+  echo "$COMMIT_DETAILS"
+  echo ""
+  echo -e "${BLUE}Diff summary:${ENDC}"
+  echo "$DIFF_SUMMARY"
+  echo ""
+fi
+
+# Create a temporary file for the prompt
+PROMPT_FILE=$(mktemp)
+
+# Create the prompt
+cat > "$PROMPT_FILE" << EOF
+You are a helpful assistant that generates high-quality GitHub PR descriptions.
+
+Based on the following commits and changes, write a detailed PR description that includes:
+
+1. A clear summary of what this PR does
+2. Key changes and their purpose
+3. Any important implementation details
+4. Testing instructions if applicable
+
+Format the response as markdown with appropriate headers and bullet points.
+Return ONLY the PR description, nothing else.
+
+# Commits
+$COMMIT_DETAILS
+
+# Diff Summary
+$DIFF_SUMMARY
+EOF
+
+if [ "$VERBOSE" = true ]; then
+  echo -e "${BLUE}Prompt:${ENDC}"
+  cat "$PROMPT_FILE"
+  echo ""
+fi
+
+echo -e "${BLUE}Generating PR description using Ollama ($MODEL)...${ENDC}"
+
+# Generate PR description using Ollama
+PR_DESCRIPTION=$(curl -s http://localhost:11434/api/generate -d "{
+  \"model\": \"$MODEL\",
+  \"prompt\": $(cat "$PROMPT_FILE" | jq -Rs .)
+}" | jq -r '.response')
+
+# Clean up the temporary file
+rm "$PROMPT_FILE"
+
+# Display the generated PR description
+echo -e "${GREEN}Generated PR description:${ENDC}"
+echo -e "${BOLD}"
+echo "$PR_DESCRIPTION"
+echo -e "${ENDC}"
+
+# If edit option is enabled, allow the user to edit the description
+if [ "$EDIT" = true ]; then
+  echo -e "${BLUE}Opening editor for you to modify the PR description...${ENDC}"
+  TEMP_FILE=$(mktemp)
+  echo "$PR_DESCRIPTION" > "$TEMP_FILE"
+  ${EDITOR:-vim} "$TEMP_FILE"
+  PR_DESCRIPTION=$(cat "$TEMP_FILE")
+  rm "$TEMP_FILE"
+  
+  echo -e "${GREEN}Updated PR description:${ENDC}"
+  echo -e "${BOLD}"
+  echo "$PR_DESCRIPTION"
+  echo -e "${ENDC}"
+fi
+
+# If not a dry run, create the PR
+if [ "$DRY_RUN" = false ]; then
+  echo -e "${BLUE}Creating GitHub PR...${ENDC}"
+  
+  # Create a temporary file for the PR description
+  DESC_FILE=$(mktemp)
+  echo "$PR_DESCRIPTION" > "$DESC_FILE"
+  
+  # Create the PR using GitHub CLI
+  gh pr create --title "$PR_TITLE" --body-file "$DESC_FILE" --base "$BASE_BRANCH"
+  
+  # Clean up
+  rm "$DESC_FILE"
+else
+  echo -e "${YELLOW}Dry run - no PR created${ENDC}"
+fi

@@ -1,0 +1,22 @@
+#!/bin/bash
+# Local LLM Git Commit Assistant
+# 
+# This script is a wrapper around llm_commit.py that makes it easier to use
+# from the command line.
+
+# Find the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Check if ollama is running
+if ! curl -s http://localhost:11434/api/tags &>/dev/null; then
+  echo -e "\033[91mError: Ollama server is not running.\033[0m"
+  echo -e "\033[93mStart it with: 'ollama serve'\033[0m"
+  exit 1
+fi
+
+# If no args are provided, just run the Python script
+if [ $# -eq 0 ]; then
+  python3 "$SCRIPT_DIR/llm_commit.py"
+else
+  python3 "$SCRIPT_DIR/llm_commit.py" "$@"
+fi
