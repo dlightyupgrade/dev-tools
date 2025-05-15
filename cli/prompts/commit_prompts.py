@@ -26,6 +26,7 @@ Return ONLY the commit message, nothing else.
 This should be written from the point-of-view of the developer (e.g., Here are changes that)
 This should not have language like "It seems" or "Having reviewed"
 It should be a bulleted list of changes
+It should be markdown formatted
 
 Changed files:
 {}
@@ -46,6 +47,7 @@ Based on the diff below, write an ULTRA-COMPACT commit message:
 - No punctuation at the end
 
 Return ONLY the commit message, nothing else.
+It should be markdown formatted
 
 Changed files:
 {}
@@ -64,6 +66,7 @@ Based on the diff below, write an informative commit message with:
 3. Any important context or implications
 
 Return ONLY the commit message, nothing else.
+It should be markdown formatted
 
 Changed files:
 {}
@@ -83,6 +86,7 @@ Based on the diff below, write a single line, concise and informative commit mes
 - No description or body text
 
 Return ONLY the commit message, nothing else.
+It should be markdown formatted
 
 Changed files:
 {}
