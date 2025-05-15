@@ -14,8 +14,13 @@ if ! curl -s http://localhost:11434/api/tags &>/dev/null; then
   exit 1
 fi
 
-# If no args are provided, just run the Python script
-if [ $# -eq 0 ]; then
+# Special case for short command
+if [ "$1" = "s" ] || [ "$1" = "-s" ] || [ "$1" = "--short" ]; then
+  # Run with compact style
+  shift # Remove the first argument
+  python3 "$SCRIPT_DIR/llm_commit.py" --style compact "$@"
+elif [ $# -eq 0 ]; then
+  # If no args are provided, just run the Python script
   python3 "$SCRIPT_DIR/llm_commit.py"
 else
   python3 "$SCRIPT_DIR/llm_commit.py" "$@"

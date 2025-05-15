@@ -56,6 +56,11 @@ llm_commit --model codellama:7b
 # Choose a different commit message style
 llm_commit --style detailed
 
+# Generate ultra-compact commit messages (max 30 chars)
+llm_commit --style compact
+# Or use the shortcut
+llm_commit s
+
 # Add prefix with ticket ID from branch name
 llm_commit --prefix
 

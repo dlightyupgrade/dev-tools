@@ -17,7 +17,11 @@ Options:
   -d, --dry-run         Show the generated commit message without committing
   -v, --verbose         Show verbose output including the diff and prompt
   -s STYLE, --style STYLE
-                        Commit message style (conventional, detailed, concise)
+                        Commit message style (conventional, compact, detailed, concise)
+                        - conventional: Standard format <type>(<scope>): <description>
+                        - compact: Ultra-short messages (max 30 chars)
+                        - concise: Single line brief summary
+                        - detailed: Full commit with description
   -p, --prefix          Add a ticket ID prefix from the branch name (e.g., SI-1234)
 
 Requirements:
@@ -138,15 +142,35 @@ def create_prompt(diff, style, files):
         prompt_template = """
 You are a helpful assistant that generates high-quality git commit messages in the Conventional Commits format.
 
-Based on the diff below, write a concise and informative commit message in the format:
+Based on the diff below, write a VERY CONCISE and informative commit message in the format:
 <type>(<scope>): <description>
 
 Where:
 - type: feat, fix, docs, style, refactor, test, chore, etc.
 - scope: optional area affected (e.g., component name, file type)
-- description: concise description of the change in imperative mood
+- description: concise description of the change in imperative mood (UNDER 50 CHARACTERS TOTAL)
 
 Do not include a body or footer section. Focus on WHY the change was made, not WHAT was changed.
+BE EXTREMELY BRIEF - the entire message should be under 50 characters if possible.
+Return ONLY the commit message, nothing else.
+
+Changed files:
+{}
+
+Diff:
+{}
+"""
+    elif style == "compact":
+        prompt_template = """
+You are a helpful assistant that generates extremely short git commit messages.
+
+Based on the diff below, write an ULTRA-COMPACT commit message:
+- MAXIMUM 30 CHARACTERS TOTAL
+- Use imperative mood (e.g., "Add", "Fix", "Update", "Remove")
+- Focus on the core purpose of the change
+- Be specific but extremely brief
+- No punctuation at the end
+
 Return ONLY the commit message, nothing else.
 
 Changed files:
@@ -174,11 +198,14 @@ Diff:
 """
     else:  # concise
         prompt_template = """
-You are a helpful assistant that generates high-quality git commit messages.
+You are a helpful assistant that generates concise git commit messages.
 
 Based on the diff below, write a single line, concise and informative commit message.
-Focus on WHY the change was made, not WHAT was changed.
-Use imperative mood, as if giving a command.
+- Keep the message under 60 characters
+- Focus on WHY the change was made, not WHAT was changed
+- Use imperative mood, as if giving a command
+- No description or body text
+
 Return ONLY the commit message, nothing else.
 
 Changed files:
@@ -206,6 +233,17 @@ def generate_commit_message(prompt, model):
         response.raise_for_status()
         result = response.json()
         message = result.get("response", "").strip()
+        
+        # Post-process the message to keep it concise
+        # If it has multiple lines, keep just the first line
+        if "\n" in message:
+            first_line = message.split("\n")[0].strip()
+            if first_line:
+                message = first_line
+        
+        # Remove any trailing punctuation
+        message = message.rstrip(".!?,;:")
+        
         return message
     except requests.exceptions.RequestException as e:
         print_colored(f"Error communicating with Ollama API: {e}", RED)
@@ -251,8 +289,8 @@ def main():
     parser.add_argument('-v', '--verbose', action='store_true',
                       help='Show verbose output including the diff and prompt')
     parser.add_argument('-s', '--style', default=DEFAULT_STYLE, 
-                      choices=['conventional', 'detailed', 'concise'],
-                      help='Commit message style (default: conventional)')
+                      choices=['conventional', 'compact', 'detailed', 'concise'],
+                      help='Commit message style (default: conventional, compact=ultra short)')
     parser.add_argument('-p', '--prefix', action='store_true',
                       help='Add a ticket ID prefix from the branch name')
     
