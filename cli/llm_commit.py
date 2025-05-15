@@ -9,7 +9,7 @@ local LLM model, and uses the generated message for a git commit.
 Usage:
   llm_commit.py [options]
 
-Options:
+Basic Options:
   -h, --help            Show this help message and exit
   -m MODEL, --model MODEL
                         Specify the Ollama model to use (default: phi3:mini)
@@ -26,6 +26,25 @@ Options:
   --push                Automatically push changes after commit
   -y, --yes             Skip confirmation prompts and commit directly
 
+Branch Creation Options:
+  -b BRANCH, --branch BRANCH
+                        Create or switch to this branch before committing
+
+PR Creation Options:
+  --pr                  Create a PR after committing and pushing
+  --base BASE           Base branch for PR (default: main)
+  --pr-edit             Edit the PR description before submitting
+
+Examples:
+  # Create a branch, commit changes, and create a PR in one command
+  llm_commit -b feature/new-feature --pr
+
+  # Create a compact commit message with automatic push
+  llm_commit -s compact --push
+
+  # Create a commit with a specific LLM model and ticket prefix
+  llm_commit -m codellama:7b -p
+
 By default, the tool will:
   1. Generate a commit message based on staged changes
   2. Ask for confirmation before committing
@@ -34,6 +53,7 @@ By default, the tool will:
 Requirements:
   - Git installed and available in PATH
   - Ollama installed and running
+  - GitHub CLI (gh) installed for PR creation
   - Python 3.6+
   - Requests library (pip install requests)
 """
@@ -302,26 +322,143 @@ def create_commit(message, auto_push=False):
         if choice.lower() == 'y':
             push_changes()
 
+def get_current_branch():
+    """Get the name of the current git branch"""
+    branch_result = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], stdout=PIPE, stderr=PIPE, text=True)
+    if branch_result.returncode != 0:
+        print_colored(f"Error getting current branch: {branch_result.stderr}", RED)
+        return None
+    return branch_result.stdout.strip()
+
+def create_branch(branch_name):
+    """Create a new git branch and switch to it"""
+    print_colored(f"\nCreating new branch: {branch_name}", BLUE)
+    
+    # Check if branch already exists
+    check_result = run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"], 
+                       stdout=PIPE, stderr=PIPE)
+    
+    if check_result.returncode == 0:
+        print_colored(f"Branch '{branch_name}' already exists.", YELLOW)
+        
+        # Ask if user wants to switch to existing branch
+        choice = input(f"Switch to existing branch '{branch_name}'? [Y/n]: ")
+        if choice.lower() == 'n':
+            print_colored("Branch creation cancelled.", YELLOW)
+            return False
+        
+        # Checkout existing branch
+        checkout_result = run(["git", "checkout", branch_name], stdout=PIPE, stderr=PIPE, text=True)
+        if checkout_result.returncode != 0:
+            print_colored(f"Error switching to branch: {checkout_result.stderr}", RED)
+            return False
+        
+        print_colored(f"Switched to existing branch '{branch_name}'", GREEN)
+        return True
+    
+    # Create and checkout new branch
+    result = run(["git", "checkout", "-b", branch_name], stdout=PIPE, stderr=PIPE, text=True)
+    if result.returncode != 0:
+        print_colored(f"Error creating branch: {result.stderr}", RED)
+        return False
+    
+    print_colored(f"Created and switched to new branch '{branch_name}'", GREEN)
+    return True
+
 def push_changes():
     """Push changes to remote repository"""
     print_colored("\nPushing changes to remote...", BLUE)
     
     # Get the current branch
-    branch_result = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], stdout=PIPE, stderr=PIPE, text=True)
-    if branch_result.returncode != 0:
-        print_colored(f"Error getting current branch: {branch_result.stderr}", RED)
-        return
-    
-    current_branch = branch_result.stdout.strip()
+    current_branch = get_current_branch()
+    if not current_branch:
+        return False
     
     # Push changes
-    result = run(["git", "push", "origin", current_branch], stdout=PIPE, stderr=PIPE, text=True)
+    result = run(["git", "push", "-u", "origin", current_branch], stdout=PIPE, stderr=PIPE, text=True)
     if result.returncode != 0:
         print_colored(f"Error pushing changes: {result.stderr}", RED)
-        return
+        return False
     
     print_colored("\nChanges pushed successfully:", GREEN)
     print(result.stdout)
+    return True
+
+def create_pr(model=DEFAULT_MODEL, edit=False, base_branch="main"):
+    """Create a PR using the llm_pr script"""
+    print_colored("\nCreating PR...", BLUE)
+    
+    # Get the directory of this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Build the command to run llm_pr
+    cmd = [os.path.join(script_dir, "llm_pr")]
+    
+    # Add options
+    if model != DEFAULT_MODEL:
+        cmd.extend(["-m", model])
+    if edit:
+        cmd.append("-e")
+    if base_branch != "main":
+        cmd.extend(["-b", base_branch])
+    
+    print_colored(f"Running: {' '.join(cmd)}", BLUE)
+    
+    # First, make sure the base branch exists or can be fetched
+    check_base_branch(base_branch)
+    
+    # Run the llm_pr script
+    try:
+        # Use subprocess.run with text=True for better error handling
+        pr_result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Print the output regardless of success/failure
+        if pr_result.stdout:
+            print(pr_result.stdout)
+        
+        if pr_result.returncode != 0:
+            if pr_result.stderr:
+                print_colored(f"Error output from PR creation:", RED)
+                print(pr_result.stderr)
+            print_colored("Error creating PR. See details above.", RED)
+            return False
+        
+        return True
+    except Exception as e:
+        print_colored(f"Error creating PR: {e}", RED)
+        return False
+
+def check_base_branch(base_branch):
+    """Check if base branch exists, try to fetch it if not"""
+    # Check if branch exists locally
+    check_result = run(["git", "rev-parse", "--verify", "--quiet", base_branch], 
+                     stdout=PIPE, stderr=PIPE)
+    
+    if check_result.returncode != 0:
+        print_colored(f"Base branch '{base_branch}' not found locally. Attempting to fetch...", YELLOW)
+        
+        # Try to get default remote
+        remote_result = run(["git", "remote"], stdout=PIPE, stderr=PIPE, text=True)
+        
+        if remote_result.returncode != 0 or not remote_result.stdout.strip():
+            print_colored("No remote repository found. Please add a remote first.", RED)
+            return False
+        
+        default_remote = remote_result.stdout.strip().split("\n")[0]
+        
+        # Try to fetch the branch
+        fetch_cmd = ["git", "fetch", default_remote, f"{base_branch}:{base_branch}"]
+        fetch_result = run(fetch_cmd, stdout=PIPE, stderr=PIPE, text=True)
+        
+        if fetch_result.returncode == 0:
+            print_colored(f"Successfully fetched '{base_branch}' from remote.", GREEN)
+            return True
+        else:
+            print_colored(f"Could not fetch '{base_branch}' from remote. PR may have limited context.", YELLOW)
+            print_colored("PR creation will continue, but may not include complete commit history.", YELLOW)
+            return False
+    
+    return True
 
 def main():
     parser = argparse.ArgumentParser(description='Generate git commit messages using a local LLM')
@@ -343,11 +480,31 @@ def main():
     parser.add_argument('-y', '--yes', action='store_true',
                       help='Skip confirmation prompts and commit directly')
     
+    # Branch creation options
+    branch_group = parser.add_argument_group('Branch Creation')
+    branch_group.add_argument('-b', '--branch', 
+                      help='Create or switch to this branch before committing')
+    
+    # PR creation options
+    pr_group = parser.add_argument_group('PR Creation')
+    pr_group.add_argument('--pr', action='store_true',
+                      help='Create a PR after committing and pushing')
+    pr_group.add_argument('--base', default='main',
+                      help='Base branch for PR (default: main)')
+    pr_group.add_argument('--pr-edit', action='store_true',
+                      help='Edit the PR description before submitting')
+    
     args = parser.parse_args()
     
     try:
         # Check dependencies
         check_dependencies()
+        
+        # Create or switch to branch if requested
+        if args.branch:
+            if not create_branch(args.branch):
+                print_colored("Failed to create or switch to branch. Exiting.", RED)
+                sys.exit(1)
         
         # Get git diff
         diff = get_git_diff()
@@ -390,6 +547,7 @@ def main():
             print(f"{BOLD}{message}{ENDC}")
         
         # Create commit if not dry-run
+        commit_success = False
         if not args.dry_run:
             if args.yes:
                 # Skip confirmation and commit directly
@@ -401,13 +559,33 @@ def main():
                 
                 print_colored("\nCommit created successfully:", GREEN)
                 print(result.stdout)
+                commit_success = True
                 
                 # Push if requested
-                if args.push:
-                    push_changes()
+                push_success = False
+                if args.push or args.pr:
+                    push_success = push_changes()
+                
+                # Create PR if requested
+                if args.pr and push_success:
+                    create_pr(model=args.model, edit=args.pr_edit, base_branch=args.base)
             else:
                 # Use interactive commit with confirmation
                 create_commit(message, args.push)
+                commit_success = True
+                
+                # Create PR if requested and not already pushed
+                if args.pr and commit_success and not args.push:
+                    choice = input("\nCreate PR? [y/N]: ")
+                    if choice.lower() == 'y':
+                        # Push changes first if needed
+                        if push_changes():
+                            create_pr(model=args.model, edit=args.pr_edit, base_branch=args.base)
+                elif args.pr and commit_success and args.push:
+                    # We already pushed from create_commit, so just create the PR
+                    choice = input("\nCreate PR? [y/N]: ")
+                    if choice.lower() == 'y':
+                        create_pr(model=args.model, edit=args.pr_edit, base_branch=args.base)
         else:
             print_colored("\nDry run - no commit created", YELLOW)
     

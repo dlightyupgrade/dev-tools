@@ -10,6 +10,8 @@ A collection of tools that use local LLM (via Ollama) to improve Git workflows w
 - Multiple style options for commit messages
 - Interactive commit workflow with confirmation prompts
 - One-step commit and push functionality
+- Branch creation and switching capabilities
+- End-to-end workflow from branch creation to PR submission
 - Integration with GitHub CLI for PR creation
 
 ## Requirements
@@ -39,6 +41,26 @@ A collection of tools that use local LLM (via Ollama) to improve Git workflows w
 3. The setup script will check dependencies and download the default model (phi3:mini).
 
 ## Usage
+
+### All-in-One Git Workflow
+
+The `llm_commit` tool now supports a complete git workflow from branch creation to PR submission:
+
+```bash
+# End-to-end workflow: create branch, commit, push, and create PR
+llm_commit --branch feature/new-feature --push --pr
+
+# Workflow with branch creation, custom commit style, and PR with editing
+llm_commit --branch bugfix/issue-42 --style compact --pr --pr-edit
+
+# Branch from current code, prefix ticket ID, auto-push, and create PR
+llm_commit --branch feature/SI-123-awesome-feature --prefix --push --pr
+
+# Shortcut commands:
+llm_commit s                   # Short for --style compact
+llm_commit pr                  # Short for --push --pr 
+llm_commit branch new-feature  # Short for --branch new-feature --push --pr
+```
 
 ### Generate Commit Messages
 
@@ -74,6 +96,18 @@ llm_commit --push
 
 # Skip confirmations and auto-push (for quick CI fixes)
 llm_commit --yes --push
+
+# Create or switch to a branch before committing
+llm_commit --branch feature/new-feature
+
+# Create a branch, commit changes, and create a PR in one command
+llm_commit --branch feature/new-feature --pr
+
+# Create a branch, commit, and push with a specific base branch for PR
+llm_commit --branch bugfix/issue-123 --pr --base develop
+
+# Complete workflow: create branch, commit with compact message, push and create PR
+llm_commit --branch feature/awesome --style compact --push --pr
 
 # See all options
 llm_commit --help
