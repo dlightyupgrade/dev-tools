@@ -19,7 +19,7 @@ MODEL="phi3:mini"
 EDIT=false
 DRY_RUN=false
 VERBOSE=false
-BASE_BRANCH="main"
+BASE_BRANCH="master"
 
 # Find the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -213,10 +213,28 @@ fi
 # Create a temporary file for the prompt
 PROMPT_FILE=$(mktemp)
 
+# Get the path to the prompt templates
+PROMPTS_DIR="$SCRIPT_DIR/prompts"
+STANDARD_PR_PROMPT="$PROMPTS_DIR/standard_pr.prompt"
+FALLBACK_PR_PROMPT="$PROMPTS_DIR/fallback_pr.prompt"
+
+# Check if prompt files exist, if not generate them
+if [ ! -f "$STANDARD_PR_PROMPT" ] || [ ! -f "$FALLBACK_PR_PROMPT" ]; then
+  echo -e "${YELLOW}Prompt templates not found. Generating them...${ENDC}"
+  cd "$PROMPTS_DIR" && python3 extract_prompts.py
+  if [ $? -ne 0 ]; then
+    echo -e "${RED}Failed to generate prompt templates. Using built-in fallbacks.${ENDC}"
+    # Use built-in fallbacks if prompt generation fails
+    FALLBACK_TEMPLATES=true
+  fi
+fi
+
 # Create the prompt
 if [ "${SKIP_COMMIT_HISTORY:-false}" = "true" ]; then
   # Different prompt when we don't have proper commit history
-  cat > "$PROMPT_FILE" << EOF
+  if [ "${FALLBACK_TEMPLATES:-false}" = "true" ] || [ ! -f "$FALLBACK_PR_PROMPT" ]; then
+    # Use built-in fallback if file doesn't exist
+    cat > "$PROMPT_FILE" << EOF
 You are a helpful assistant that generates high-quality GitHub PR descriptions.
 
 Based on the following information, write a detailed PR description that includes:
@@ -235,9 +253,16 @@ $COMMIT_DETAILS
 # Current Changes
 $DIFF_SUMMARY
 EOF
+  else
+    # Use file template with variable substitution
+    PROMPT_TEMPLATE=$(cat "$FALLBACK_PR_PROMPT")
+    echo "${PROMPT_TEMPLATE/\{\}/$COMMIT_DETAILS}" | sed "s/\{\}/$DIFF_SUMMARY/" > "$PROMPT_FILE"
+  fi
 else
   # Standard prompt with commit history
-  cat > "$PROMPT_FILE" << EOF
+  if [ "${FALLBACK_TEMPLATES:-false}" = "true" ] || [ ! -f "$STANDARD_PR_PROMPT" ]; then
+    # Use built-in fallback if file doesn't exist
+    cat > "$PROMPT_FILE" << EOF
 You are a helpful assistant that generates high-quality GitHub PR descriptions.
 
 Based on the following commits and changes, write a detailed PR description that includes:
@@ -256,6 +281,11 @@ $COMMIT_DETAILS
 # Diff Summary
 $DIFF_SUMMARY
 EOF
+  else
+    # Use file template with variable substitution
+    PROMPT_TEMPLATE=$(cat "$STANDARD_PR_PROMPT")
+    echo "${PROMPT_TEMPLATE/\{\}/$COMMIT_DETAILS}" | sed "s/\{\}/$DIFF_SUMMARY/" > "$PROMPT_FILE"
+  fi
 fi
 
 if [ "$VERBOSE" = true ]; then

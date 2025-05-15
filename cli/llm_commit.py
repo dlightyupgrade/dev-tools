@@ -5,6 +5,7 @@ Local LLM Git Commit Assistant
 This script uses a local LLM (via Ollama) to generate commit messages
 based on git diffs. It extracts git diff information, passes it to a
 local LLM model, and uses the generated message for a git commit.
+It automatically stages all unstaged changes before generating the message.
 
 Usage:
   llm_commit.py [options]
@@ -12,7 +13,7 @@ Usage:
 Basic Options:
   -h, --help            Show this help message and exit
   -m MODEL, --model MODEL
-                        Specify the Ollama model to use (default: phi3:mini)
+                        Specify the Ollama model to use (default: codellama:7b)
   -e, --edit            Edit the generated commit message before committing
   -d, --dry-run         Show the generated commit message without committing
   -v, --verbose         Show verbose output including the diff and prompt
@@ -67,6 +68,15 @@ import sys
 import tempfile
 from subprocess import PIPE, run
 
+# Import prompts from the prompts module
+try:
+    from prompts import PROMPT_MAP
+except ImportError:
+    # If running from a different directory, try to import from relative path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.append(script_dir)
+    from prompts import PROMPT_MAP
+
 try:
     import requests
 except ImportError:
@@ -74,7 +84,7 @@ except ImportError:
     sys.exit(1)
 
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
-DEFAULT_MODEL = "phi3:mini"
+DEFAULT_MODEL = "codellama:7b"
 DEFAULT_STYLE = "conventional"
 
 # ANSI color codes
@@ -111,26 +121,26 @@ def check_dependencies():
 
 def get_git_diff():
     """Get the git diff for staged changes"""
+    # First, automatically check for any unstaged changes and stage them
+    unstaged_result = run(["git", "diff"], stdout=PIPE, stderr=PIPE, text=True)
+    if unstaged_result.stdout.strip():
+        print_colored("Unstaged changes found. Automatically staging all changes.", BLUE)
+        stage_result = run(["git", "add", "."], stdout=PIPE, stderr=PIPE)
+        if stage_result.returncode != 0:
+            print_colored(f"Error staging changes: {stage_result.stderr}", RED)
+            sys.exit(1)
+        print_colored("All changes have been staged.", GREEN)
+    
+    # Now get the staged changes
     result = run(["git", "diff", "--staged"], stdout=PIPE, stderr=PIPE, text=True)
     if result.returncode != 0:
         print_colored(f"Error getting git diff: {result.stderr}", RED)
         sys.exit(1)
     
-    # If no staged changes, check if there are unstaged changes
+    # If still no staged changes, exit
     if not result.stdout.strip():
-        unstaged_result = run(["git", "diff"], stdout=PIPE, stderr=PIPE, text=True)
-        if unstaged_result.stdout.strip():
-            print_colored("No staged changes found. There are unstaged changes available.", YELLOW)
-            choice = input("Would you like to stage all changes? [y/N]: ")
-            if choice.lower() == 'y':
-                run(["git", "add", "."], stdout=PIPE, stderr=PIPE, check=True)
-                return get_git_diff()
-            else:
-                print_colored("No changes staged for commit. Exiting.", YELLOW)
-                sys.exit(0)
-        else:
-            print_colored("No changes (staged or unstaged) found. Exiting.", YELLOW)
-            sys.exit(0)
+        print_colored("No changes found to commit. Exiting.", YELLOW)
+        sys.exit(0)
     
     return result.stdout
 
@@ -163,86 +173,20 @@ def extract_ticket_from_branch():
     
     return None
 
-def create_prompt(diff, style, files):
+def create_prompt(diff, style, files, isDryRun):
     """Create the prompt for the LLM based on the diff and style"""
-    if style == "conventional":
-        prompt_template = """
-You are a helpful assistant that generates high-quality git commit messages in the Conventional Commits format.
-
-Based on the diff below, write a VERY CONCISE and informative commit message in the format:
-<type>(<scope>): <description>
-
-Where:
-- type: feat, fix, docs, style, refactor, test, chore, etc.
-- scope: optional area affected (e.g., component name, file type)
-- description: concise description of the change in imperative mood (UNDER 50 CHARACTERS TOTAL)
-
-Do not include a body or footer section. Focus on WHY the change was made, not WHAT was changed.
-BE EXTREMELY BRIEF - the entire message should be under 50 characters if possible.
-Return ONLY the commit message, nothing else.
-
-Changed files:
-{}
-
-Diff:
-{}
-"""
-    elif style == "compact":
-        prompt_template = """
-You are a helpful assistant that generates extremely short git commit messages.
-
-Based on the diff below, write an ULTRA-COMPACT commit message:
-- MAXIMUM 30 CHARACTERS TOTAL
-- Use imperative mood (e.g., "Add", "Fix", "Update", "Remove")
-- Focus on the core purpose of the change
-- Be specific but extremely brief
-- No punctuation at the end
-
-Return ONLY the commit message, nothing else.
-
-Changed files:
-{}
-
-Diff:
-{}
-"""
-    elif style == "detailed":
-        prompt_template = """
-You are a helpful assistant that generates high-quality git commit messages with detailed explanations.
-
-Based on the diff below, write an informative commit message with:
-1. A short, specific summary line (50-72 chars)
-2. A detailed description explaining WHY the change was made
-3. Any important context or implications
-
-Return ONLY the commit message, nothing else.
-
-Changed files:
-{}
-
-Diff:
-{}
-"""
-    else:  # concise
-        prompt_template = """
-You are a helpful assistant that generates concise git commit messages.
-
-Based on the diff below, write a single line, concise and informative commit message.
-- Keep the message under 60 characters
-- Focus on WHY the change was made, not WHAT was changed
-- Use imperative mood, as if giving a command
-- No description or body text
-
-Return ONLY the commit message, nothing else.
-
-Changed files:
-{}
-
-Diff:
-{}
-"""
+    # Get the appropriate prompt template based on the style
+    prompt_template = PROMPT_MAP.get(style, PROMPT_MAP["conventional"])
     
+    # Display prompt
+    if isDryRun:
+        print_colored("\nGenerated commit prompt:", GREEN)
+        print(f"{BOLD}{prompt_template}{ENDC}")
+
+    # Join the list of files into a single string
     files_text = "\n".join(files)
+    
+    # Return the formatted prompt
     return prompt_template.format(files_text, diff)
 
 def generate_commit_message(prompt, model):
@@ -263,13 +207,13 @@ def generate_commit_message(prompt, model):
         
         # Post-process the message to keep it concise
         # If it has multiple lines, keep just the first line
-        if "\n" in message:
-            first_line = message.split("\n")[0].strip()
-            if first_line:
-                message = first_line
+        # if "\n" in message:
+        #     first_line = message.split("\n")[0].strip()
+        #     if first_line:
+        #         message = first_line
         
-        # Remove any trailing punctuation
-        message = message.rstrip(".!?,;:")
+        # # Remove any trailing punctuation
+        # message = message.rstrip(".!?,;:")
         
         return message
     except requests.exceptions.RequestException as e:
@@ -518,7 +462,7 @@ def main():
             print(diff)
         
         # Create prompt
-        prompt = create_prompt(diff, args.style, files)
+        prompt = create_prompt(diff, args.style, files, args.dry_run)
         
         if args.verbose:
             print_colored("\nPrompt:", BLUE)
@@ -534,7 +478,7 @@ def main():
                 # Check if message already contains the ticket
                 if not re.search(rf'\b{re.escape(ticket)}\b', message):
                     message = f"{ticket}: {message}"
-        
+
         # Display generated message
         print_colored("\nGenerated commit message:", GREEN)
         print(f"{BOLD}{message}{ENDC}")

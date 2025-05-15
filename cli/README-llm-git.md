@@ -8,6 +8,7 @@ A collection of tools that use local LLM (via Ollama) to improve Git workflows w
 - Create high-quality PR descriptions from commit history
 - Works completely offline with local LLM models
 - Multiple style options for commit messages
+- Automatic staging of all changes (no need for git add)
 - Interactive commit workflow with confirmation prompts
 - One-step commit and push functionality
 - Branch creation and switching capabilities
@@ -147,6 +148,17 @@ The tools use default settings that work well for most cases:
 - Default PR base branch: `main`
 
 You can override these defaults with command-line arguments as shown in the usage examples.
+
+### Customizing Prompts
+
+You can customize the LLM prompts used to generate commit messages and PR descriptions by editing the template files:
+
+- Commit message prompts: `cli/prompts/commit_prompts.py`
+- PR description prompts: `cli/prompts/pr_prompts.py`
+
+These files contain the prompt templates with placeholders for the git diff information. Modify these files to change the style, format, or instructions used to generate content.
+
+For example, to customize the conventional commit style, edit the `CONVENTIONAL_PROMPT` variable in `commit_prompts.py`.
 
 ## Alternative Models
 
