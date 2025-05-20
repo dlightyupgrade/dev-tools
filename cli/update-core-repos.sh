@@ -18,6 +18,9 @@ ASK_BEFORE_SWITCH="false"
 # Set to 'true' to force push successfully rebased branches to origin
 FORCE_PUSH="true"
 
+# Set to 'true' to prompt for deleting local branches without tracking remote
+CLEAN_BRANCHES="true"
+
 # Repositories will be loaded from config file
 
 #===============================================================
@@ -78,6 +81,7 @@ usage() {
   echo "  -r, --rebase    Specify a custom rebase file"
   echo "  -g, --generate  Generate example config files and exit"
   echo "  -n, --no-push   Don't force push rebased branches to origin"
+  echo "  -c, --no-clean  Don't prompt for cleaning untracked branches"
   echo "  -h, --help      Display this help message"
   echo ""
   echo "If CONFIG_FILE is not specified, defaults to $PROJECTS_DIR/$CONFIG_FILE_NAME"
@@ -104,6 +108,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     -n|--no-push)
       FORCE_PUSH="false"
+      shift 1
+      ;;
+    -c|--no-clean)
+      CLEAN_BRANCHES="false"
       shift 1
       ;;
     -g|--generate)
@@ -248,6 +256,7 @@ update_repo() {
   
   # Get branches to rebase from the rebase file
   branches_to_rebase=()
+  local_branches_without_remote=()
   
   if [ -f "$REBASE_FILE" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
@@ -276,6 +285,38 @@ update_repo() {
     done < "$REBASE_FILE"
   fi
   
+  # Find local branches without remote tracking branch if clean mode is enabled
+  if [ "$CLEAN_BRANCHES" = "true" ]; then
+    echo "Looking for local branches without remote tracking branch..."
+    # Get all local branches
+    all_local_branches=$(git branch | grep -v "^*" | sed 's/^[[:space:]]*//')
+    
+    # Check each local branch
+    for branch in $all_local_branches; do
+      # Skip BASE_BRANCH
+      if [ "$branch" = "$BASE_BRANCH" ] || [ "$branch" = "master" ] || [ "$branch" = "main" ]; then
+        continue
+      fi
+      
+      # Check if branch has a remote tracking branch
+      remote_branch=$(git for-each-ref --format='%(upstream:short)' refs/heads/$branch)
+      if [ -z "$remote_branch" ]; then
+        # Check if branch exists on origin
+        if ! git ls-remote --heads origin $branch | grep -q $branch; then
+          local_branches_without_remote+=("$branch")
+        fi
+      fi
+    done
+    
+    # Inform about branches without remote
+    if [ ${#local_branches_without_remote[@]} -gt 0 ]; then
+      echo -e "${YELLOW}[$repo_name] Found ${#local_branches_without_remote[@]} local branches without remote tracking branch:${NC}"
+      for branch in "${local_branches_without_remote[@]}"; do
+        echo -e "  - $branch"
+      done
+    fi
+  fi
+
   # Process each branch that needs rebasing
   has_conflict=false
   for branch in "${branches_to_rebase[@]}"; do
@@ -377,6 +418,30 @@ update_repo() {
     fi
   fi
   
+  # Ask about deleting local branches without remote
+  if [ "$CLEAN_BRANCHES" = "true" ] && [ ${#local_branches_without_remote[@]} -gt 0 ]; then
+    echo -e "\n${YELLOW}[$repo_name] Do you want to delete local branches without remote tracking branch?${NC}"
+    echo -e "${YELLOW}These branches are only available locally and not pushed to origin:${NC}"
+    
+    for branch in "${local_branches_without_remote[@]}"; do
+      # Make sure we're on BASE_BRANCH before trying to delete
+      if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BASE_BRANCH" ]; then
+        git checkout "$BASE_BRANCH"
+      fi
+      
+      read -p "Delete branch '$branch'? (y/n): " answer
+      case ${answer:0:1} in
+        y|Y )
+          git branch -D "$branch"
+          echo -e "${GREEN}[$repo_name] Deleted branch '$branch'.${NC}"
+          ;;
+        * )
+          echo -e "${YELLOW}[$repo_name] Keeping branch '$branch'.${NC}"
+          ;;
+      esac
+    done
+  fi
+
   # Return to original directory
   cd - > /dev/null
 
@@ -446,6 +511,7 @@ echo -e "Base branch: ${GREEN}$BASE_BRANCH${NC}"
 echo -e "Auto-stashing changes: ${GREEN}Enabled${NC}"
 echo -e "Force push after rebase: $([ "$FORCE_PUSH" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
 echo -e "Ask before branch switch: $([ "$ASK_BEFORE_SWITCH" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
+echo -e "Check for untracked branches: $([ "$CLEAN_BRANCHES" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
 echo -e "Config file: ${GREEN}$CONFIG_FILE${NC}"
 echo -e "Rebase file: ${GREEN}$REBASE_FILE${NC}"
 echo -e "Found ${GREEN}${#REPOS[@]}${NC} repositories to update."
