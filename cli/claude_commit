@@ -1,0 +1,9 @@
+#!/bin/bash
+# Claude Git Commit Assistant
+# A wrapper script for claude_commit.py
+
+# Get the directory of this script
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Call the Python script with all arguments
+python3 "$SCRIPT_DIR/claude_commit.py" "$@"

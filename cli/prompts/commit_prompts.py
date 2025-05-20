@@ -28,6 +28,8 @@ This should not have language like "It seems" or "Having reviewed"
 It should be a bulleted list of changes
 It should be markdown formatted
 
+Only return the commit message.
+
 Changed files:
 {}
 
@@ -46,8 +48,13 @@ Based on the diff below, write an ULTRA-COMPACT commit message:
 - Be specific but extremely brief
 - No punctuation at the end
 
-Return ONLY the commit message, nothing else.
-It should be markdown formatted
+Do not include a body or footer section. Focus on WHY the change was made, not WHAT was changed.
+Do not include any code samples.
+Do not explain yourself, do not give choices about commit messages
+
+Based on the diff below, write a VERY CONCISE and informative commit message in the format:
+
+Give me only the actual commit message that will be used in a script to auto commit.
 
 Changed files:
 {}
@@ -66,7 +73,6 @@ Based on the diff below, write an informative commit message with:
 3. Any important context or implications
 
 Return ONLY the commit message, nothing else.
-It should be markdown formatted
 
 Changed files:
 {}
