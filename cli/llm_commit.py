@@ -85,7 +85,7 @@ except ImportError:
 
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "codellama:7b"
-DEFAULT_STYLE = "conventional"
+DEFAULT_STYLE = "compact"
 
 # ANSI color codes
 BLUE = "\033[94m"

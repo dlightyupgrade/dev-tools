@@ -15,7 +15,7 @@ ENDC="\033[0m"
 BOLD="\033[1m"
 
 # Default values
-MODEL="phi3:mini"
+MODEL="codellama:7b"
 EDIT=false
 DRY_RUN=false
 VERBOSE=false
