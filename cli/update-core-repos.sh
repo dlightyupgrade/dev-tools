@@ -1,10 +1,5 @@
 #!/bin/bash
-# Enable associative arrays (requires bash 4+)
-if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
-  echo "This script requires Bash version 4 or higher for associative arrays."
-  echo "Your Bash version is ${BASH_VERSION}"
-  echo "Using simple array fallback mode."
-fi
+
 
 #===============================================================
 # CONFIGURATION
