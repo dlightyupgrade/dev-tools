@@ -5,7 +5,10 @@ A utility script that pulls the latest changes from `master` branch for all conf
 ## Quick Start
 
 ```bash
-# Update all Core Service repos
+# Add alias to .zshrc, change the dir to wherever this script is saved
+alias -g pru="~/code/personal-dev-tools/cli/update-core-repos.sh"
+
+# Update all configured repos - see below
 pru
 
 # Update with branch switch confirmation
