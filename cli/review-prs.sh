@@ -38,7 +38,7 @@ if [ ! -f "$DAILY_NOTE" ]; then
 ---
 title: Daily Notes - $MONTH_FULL $DAY, $YEAR
 date: $TODAY
-tags: [#daily, #work-log]
+tags: [daily, work-log]
 ---
 
 # Daily Notes - $MONTH_FULL $DAY, $YEAR
