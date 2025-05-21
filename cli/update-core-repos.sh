@@ -6,7 +6,7 @@
 #===============================================================
 # Projects directory
 PROJECTS_DIR="$HOME/code"
-CONFIG_FILE_NAME="repo-config.txt"
+CONFIG_FILE_NAME="project-list.txt"
 REBASE_FILE_NAME="to-rebase.txt"
 
 # Base branch to pull from (typically 'master' or 'main')
@@ -48,11 +48,11 @@ create_example_files() {
 # You can use relative paths (from $PROJECTS_DIR) or absolute paths
 # Lines starting with # are treated as comments
 
-# Core Service repositories
-loan-hardship-servicing-srvc
-creditline-hardship-servicing-srvc
-loan-servicing-srvc
-actor-hardship-srvc
+# Example repositories
+example-repo-1
+example-repo-2
+example-repo-3
+example-repo-4
 
 # Example of absolute path (commented out)
 # /Users/dlighty/code/personal-dev-tools
@@ -68,7 +68,7 @@ EOF
 # Format: one branch name per line, or 'repo:branch' to target specific repositories
 # Examples:
 # feature-branch              # Rebase 'feature-branch' in all repositories where it exists
-# loan-hardship-servicing-srvc:SI-1234-feature  # Rebase only in specific repository
+# example-repo:feature-123    # Rebase only in specific repository
 EOF
   fi
 }
@@ -171,8 +171,8 @@ else
   echo -e "${RED}Error: Config file $CONFIG_FILE does not exist!${NC}"
   echo "Please create a config file with repository paths, one per line."
   echo "Example:"
-  echo "loan-hardship-servicing-srvc"
-  echo "creditline-hardship-servicing-srvc"
+  echo "example-repo-1"
+  echo "example-repo-2"
   exit 1
 fi
 

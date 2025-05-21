@@ -55,7 +55,7 @@ llm_commit --branch feature/new-feature --push --pr
 llm_commit --branch bugfix/issue-42 --style compact --pr --pr-edit
 
 # Branch from current code, prefix ticket ID, auto-push, and create PR
-llm_commit --branch feature/SI-123-awesome-feature --prefix --push --pr
+llm_commit --branch feature/TICKET-123-awesome-feature --prefix --push --pr
 
 # Shortcut commands:
 llm_commit s                   # Short for --style compact
