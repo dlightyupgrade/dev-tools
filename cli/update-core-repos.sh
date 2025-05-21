@@ -21,6 +21,9 @@ FORCE_PUSH="true"
 # Set to 'true' to prompt for deleting local branches without tracking remote
 CLEAN_BRANCHES="true"
 
+# Set to 'true' to force rebase even if master didn't change
+FORCE_REBASE="false"
+
 # Repositories will be loaded from config file
 
 #===============================================================
@@ -82,6 +85,7 @@ usage() {
   echo "  -g, --generate  Generate example config files and exit"
   echo "  -n, --no-push   Don't force push rebased branches to origin"
   echo "  -c, --no-clean  Don't prompt for cleaning untracked branches"
+  echo "  -f, --force     Force rebase even if master didn't change"
   echo "  -h, --help      Display this help message"
   echo ""
   echo "If CONFIG_FILE is not specified, defaults to $PROJECTS_DIR/$CONFIG_FILE_NAME"
@@ -112,6 +116,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     -c|--no-clean)
       CLEAN_BRANCHES="false"
+      shift 1
+      ;;
+    -f|--force)
+      FORCE_REBASE="true"
       shift 1
       ;;
     -g|--generate)
@@ -254,6 +262,15 @@ update_repo() {
   echo "Pulling latest changes for $BASE_BRANCH..."
   pull_result=$(git pull origin "$BASE_BRANCH" 2>&1)
   
+  # Check if master was actually updated
+  master_updated=false
+  if [[ "$pull_result" != *"Already up to date"* ]]; then
+    master_updated=true
+    echo -e "${GREEN}[$repo_name] $BASE_BRANCH was updated${NC}"
+  else
+    echo -e "${YELLOW}[$repo_name] $BASE_BRANCH already up to date${NC}"
+  fi
+  
   # Get branches to rebase from the rebase file
   branches_to_rebase=()
   local_branches_without_remote=()
@@ -324,6 +341,13 @@ update_repo() {
     if [ "$branch" = "$BASE_BRANCH" ] || [ "$branch" = "master" ] || [ "$branch" = "main" ]; then
       echo -e "${YELLOW}[$repo_name] Skipping $branch as it's a protected branch.${NC}"
       skipped_branches+=("$branch (protected branch)")
+      continue
+    fi
+    
+    # Skip rebase if master wasn't updated (unless forced)
+    if [ "$master_updated" = false ] && [ "$FORCE_REBASE" = false ]; then
+      echo -e "${YELLOW}[$repo_name] Skipping rebase of '$branch' as $BASE_BRANCH wasn't updated.${NC}"
+      skipped_branches+=("$branch (master not updated)")
       continue
     fi
     
@@ -510,6 +534,7 @@ echo -e "${YELLOW}======= Configuration =======${NC}"
 echo -e "Base branch: ${GREEN}$BASE_BRANCH${NC}"
 echo -e "Auto-stashing changes: ${GREEN}Enabled${NC}"
 echo -e "Force push after rebase: $([ "$FORCE_PUSH" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
+echo -e "Force rebase regardless of updates: $([ "$FORCE_REBASE" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
 echo -e "Ask before branch switch: $([ "$ASK_BEFORE_SWITCH" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
 echo -e "Check for untracked branches: $([ "$CLEAN_BRANCHES" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
 echo -e "Config file: ${GREEN}$CONFIG_FILE${NC}"
