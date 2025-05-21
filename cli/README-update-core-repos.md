@@ -17,6 +17,9 @@ pru -a
 # Update but don't force push rebased branches
 pru -n
 
+# Force rebase even if master hasn't changed
+pru -f
+
 # Generate example config files
 pru -g
 
@@ -30,6 +33,7 @@ pru -h
 - Automatically pulls latest changes from master branch
 - Auto-stashes uncommitted changes before switching/pulling
 - Selectively rebases specific branches based on config file
+- Intelligently skips rebasing when master hasn't changed (with force option available)
 - Automatically force pushes successfully rebased branches
 - Option to stay on master branch after update
 - Detailed reporting of actions and results
@@ -79,6 +83,9 @@ ASK_BEFORE_SWITCH="false"
 
 # Set to 'true' to force push successfully rebased branches to origin
 FORCE_PUSH="true"
+
+# Set to 'true' to force rebase even if master didn't change
+FORCE_REBASE="false"
 ```
 
 ## Usage Options
@@ -91,12 +98,15 @@ Options:
   -r, --rebase    Specify a custom rebase file
   -g, --generate  Generate example config files and exit
   -n, --no-push   Don't force push rebased branches to origin
+  -c, --no-clean  Don't prompt for cleaning untracked branches
+  -f, --force     Force rebase even if master didn't change
   -h, --help      Display this help message
 ```
 
 ## Safety Features
 
 - Never rebases master/main branches (protected)
+- Skips unnecessary rebases when master hasn't changed
 - Auto-stashing of uncommitted changes
 - Automatic conflict detection and abort
 - Rebase and push are treated as separate operations
@@ -139,4 +149,7 @@ pru /path/to/ci-repos.txt
 
 # Non-interactive mode (never force push)
 pru -n /path/to/ci-repos.txt
+
+# Force rebasing even if master hasn't changed
+pru -f
 ```
