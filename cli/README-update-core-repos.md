@@ -38,14 +38,14 @@ pru -h
 
 ### Repository Config File
 
-Create a file at `~/code/repo-config.txt` with repositories to update:
+Create a file at `~/code/project-list.txt` with repositories to update:
 
 ```
 # Repositories to update (one per line)
-loan-hardship-servicing-srvc         # Relative path from ~/code
-creditline-hardship-servicing-srvc
-loan-servicing-srvc
-actor-hardship-srvc
+example-repo-1                       # Relative path from ~/code
+example-repo-2
+example-api
+example-service
 /path/to/another/repo                # Absolute path example
 ```
 
@@ -55,8 +55,8 @@ Create a file at `~/code/to-rebase.txt` with branches to rebase:
 
 ```
 # Branch names to rebase (one per line)
-feature/SI-1234                                     # Any repo with this branch
-loan-hardship-servicing-srvc:feature/SI-5678        # Specific repo:branch
+feature/ticket-123                                  # Any repo with this branch
+example-repo-1:feature/ticket-456                   # Specific repo:branch
 # develop                                           # commented = skipped
 # master                                            # protected branches are automatically skipped
 ```
@@ -68,7 +68,7 @@ Edit these variables at the top of the script to change defaults:
 ```bash
 # Projects directory
 PROJECTS_DIR="$HOME/code"
-CONFIG_FILE_NAME="repo-config.txt"
+CONFIG_FILE_NAME="project-list.txt"
 REBASE_FILE_NAME="to-rebase.txt"
 
 # Base branch to pull from (typically 'master' or 'main')
