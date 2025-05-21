@@ -33,7 +33,8 @@ TEMPLATE_FILE="$PROJECT_DIR/daily-note-template.txt"
 
 # Config file options
 CONFIGS=(
-  "$PROJECT_DIR/repo-config.txt"
+  "$PROJECT_DIR/project-list.txt"
+  "$DIR/project-list.txt"
 )
 
 # Create daily notes directory structure if needed
