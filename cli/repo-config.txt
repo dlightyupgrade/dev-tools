@@ -1,0 +1,13 @@
+# Configuration file for review-prs.sh
+# List repositories to check for PRs, one per line
+# You can use relative paths (from $HOME/code) or absolute paths
+# Lines starting with # are treated as comments
+
+# Example repositories - replace with your own
+example-repo-1
+example-repo-2
+example-repo-3
+example-repo-4
+
+# Example of absolute path (uncomment if needed)
+# /absolute/path/to/repo
