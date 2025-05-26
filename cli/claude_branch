@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# ===============================================================
+# claude_branch
+# Creates a new git branch using natural language input from Claude
+# Usage: claude_branch "create a branch for SI-1234 to fix the readme"
+# ===============================================================
+
+# Colors for output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Show help if requested
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+  echo -e "${BLUE}${BOLD}Claude Branch Creator${NC}"
+  echo -e "Creates a new git branch using natural language input"
+  echo ""
+  echo -e "${YELLOW}Usage:${NC}"
+  echo -e "  claude_branch \"create a branch for SI-1234 to fix the readme\""
+  echo -e "  claude_branch \"make a no-jira branch to update docs\""
+  echo ""
+  echo -e "${YELLOW}Features:${NC}"
+  echo -e "  - Automatically extracts ticket ID and description from your prompt"
+  echo -e "  - Updates master branch before branching"
+  echo -e "  - Creates properly formatted branch name (SI-1234_fix-readme or no-jira-update-docs)"
+  echo -e "  - Adds branch to tracking file for future updates/rebases"
+  echo ""
+  echo -e "${YELLOW}Examples:${NC}"
+  echo -e "  claude_branch \"create a branch for SI-1234 to implement validation\""
+  echo -e "  claude_branch \"I need a branch for ticket SI-8765 to fix the login bug\""
+  echo -e "  claude_branch \"make a no-jira branch to update readme\""
+  exit 0
+fi
+
+# Get the input from the command line
+INPUT="$*"
+
+# If no input, show usage
+if [ -z "$INPUT" ]; then
+  echo -e "${RED}Error: No input provided.${NC}"
+  echo -e "Usage: claude_branch \"create a branch for SI-1234 to fix the readme\""
+  echo -e "       claude_branch \"make a no-jira branch to update docs\""
+  echo -e "For more details: claude_branch --help"
+  exit 1
+fi
+
+# Parse input to extract ticket ID and description
+# Look for common ticket patterns (SI-XXXX, NO-JIRA, etc.)
+if [[ "$INPUT" =~ ([A-Za-z]+-[0-9]+) ]]; then
+  # Found a ticket ID like SI-1234
+  TICKET="${BASH_REMATCH[1]}"
+elif [[ "$INPUT" =~ (no[ -]?jira|nojira) ]]; then
+  # Found "no jira" or variant
+  TICKET="no-jira"
+else
+  # No ticket found, default to no-jira
+  TICKET="no-jira"
+  echo -e "${YELLOW}No ticket ID found in input, using 'no-jira'.${NC}"
+fi
+
+# Extract description - look for phrases like "to fix", "for fixing", etc.
+if [[ "$INPUT" =~ (for|to) ]]; then
+  # Extract text after "for" or "to"
+  if [[ "$INPUT" =~ (for|to)([^A-Za-z0-9-]*)([A-Za-z0-9-].+)$ ]]; then
+    DESCRIPTION="${BASH_REMATCH[3]}"
+    # Clean up the description
+    DESCRIPTION=$(echo "$DESCRIPTION" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    DESCRIPTION=$(echo "$DESCRIPTION" | sed 's/[^A-Za-z0-9 -]//g')
+  else
+    # Fallback - just use the last few words
+    DESCRIPTION=$(echo "$INPUT" | awk '{for (i=NF-2;i<=NF;i++) printf "%s ", $i}' | sed 's/[^A-Za-z0-9 -]//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  fi
+else
+  # Fallback - just use the last few words
+  DESCRIPTION=$(echo "$INPUT" | awk '{for (i=NF-2;i<=NF;i++) printf "%s ", $i}' | sed 's/[^A-Za-z0-9 -]//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+fi
+
+# Ensure we have a description
+if [ -z "$DESCRIPTION" ]; then
+  echo -e "${RED}Could not extract a meaningful description from input.${NC}"
+  echo -e "${YELLOW}Please try again with a clearer description.${NC}"
+  exit 1
+fi
+
+# Echo what we're about to do
+echo -e "${BLUE}Creating branch with:${NC}"
+echo -e "  ${BOLD}Ticket:${NC} $TICKET"
+echo -e "  ${BOLD}Description:${NC} $DESCRIPTION"
+echo ""
+
+# Call the create-branch.sh script
+SCRIPT_DIR="$(dirname "$0")"
+"$SCRIPT_DIR/create-branch.sh" "$TICKET" "$DESCRIPTION"
