@@ -1,0 +1,21 @@
+# Sample repository mappings for Maven version checker
+# Format: property-name=repository-name
+# Lines starting with # are comments
+
+# Example: When Maven property name differs from GitHub repository name
+user-auth-service=user-authentication-srvc
+payment-processor=payment-processing-service
+notification-lib=notification-library
+
+# Example: When repositories have different naming conventions
+api-client=api-client-library
+data-utils=data-utilities
+config-manager=configuration-management
+
+# Example: When property names use dashes but repos use underscores  
+message-queue=message_queue_service
+file-storage=file_storage_utils
+
+# Example: When Maven artifacts have different names than repositories
+spring-security-extension=security-extensions
+jackson-custom-serializer=json-serialization-utils

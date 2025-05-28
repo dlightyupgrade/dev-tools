@@ -22,18 +22,18 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: check-maven-versions [options] [path-to-pom.xml]"
             echo ""
             echo "Options:"
-            echo "  --org ORGANIZATION    GitHub organization name (e.g., 'Credify', 'microsoft')"
+            echo "  --org ORGANIZATION    GitHub organization name (e.g., 'microsoft', 'apache')"
             echo "  --config FILE         Configuration file with property->repo mappings"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Examples:"
-            echo "  check-maven-versions --org Credify pom.xml"
-            echo "  check-maven-versions --org microsoft --config ./repo-mappings.txt pom.xml"
+            echo "  check-maven-versions --org mycompany pom.xml"
+            echo "  check-maven-versions --org apache --config ./repo-mappings.txt pom.xml"
             echo ""
             echo "Config file format (one mapping per line):"
             echo "  property-name=repository-name"
-            echo "  actor-srvc=actor-service"
-            echo "  financial-utils=financial-utilities"
+            echo "  auth-service=authentication-service"
+            echo "  data-utils=data-utilities"
             exit 0
             ;;
         *)
