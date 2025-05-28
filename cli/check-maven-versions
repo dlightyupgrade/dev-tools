@@ -184,8 +184,8 @@ while IFS='=' read -r prop_name current_version; do
         
         # Get latest tag from GitHub using GraphQL (ordered by commit date, not creation date)
         latest_tag=$(gh api graphql -f query="{repository(owner: \"$GITHUB_ORG\", name: \"$repo_name\"){refs(refPrefix: \"refs/tags/\", first: 1, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}){nodes{name}}}}" --jq '.data.repository.refs.nodes[].name' 2>/dev/null)
-        
-        if [[ "$latest_tag" == "null" ]] || [[ -z "$latest_tag" ]]; then
+
+        if [[ "$latest_tag" == "null" ]] || [[ "$latest_tag" == *"Could not resolve to a Repository with the name"* ]] || [[ -z "$latest_tag" ]]; then
             echo " ❌ Repository not found or no tags"
         elif [[ "$latest_tag" == "$current_version" ]]; then
             echo " ✅ Up to date"
