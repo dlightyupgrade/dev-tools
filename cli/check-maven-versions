@@ -142,10 +142,34 @@ is_version_newer() {
     fi
 }
 
+# Detect major version changes - returns 0 if major version change detected
+is_major_version_change() {
+    local current="$1"
+    local latest="$2"
+    
+    # Remove 'v' prefix if present
+    local current_clean="${current#v}"
+    local latest_clean="${latest#v}"
+    
+    # Extract major version number (first number before first dot)
+    local current_major="${current_clean%%.*}"
+    local latest_major="${latest_clean%%.*}"
+    
+    # Check if both are numeric and different
+    if [[ "$current_major" =~ ^[0-9]+$ ]] && [[ "$latest_major" =~ ^[0-9]+$ ]]; then
+        if [[ "$current_major" != "$latest_major" ]]; then
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
 # Extract property definitions from pom.xml (skip java.version)
 properties=$(grep -E "^\s*<[^>]+\.version>" "$POM_FILE" | grep -v "java.version" | sed 's/[[:space:]]*<\([^>]*\)>\([^<]*\)<.*/\1=\2/')
 
 updates_available=0
+major_version_changes=0
 total_checked=0
 
 while IFS='=' read -r prop_name current_version; do
@@ -158,18 +182,30 @@ while IFS='=' read -r prop_name current_version; do
         
         printf "%-40s -> %-40s (current: %-20s)" "$base_name" "$repo_name" "$current_version"
         
-        # Get latest tag from GitHub
-        latest_tag=$(gh api repos/$GITHUB_ORG/$repo_name/tags --paginate 2>/dev/null | jq -r '.[0].name' 2>/dev/null)
+        # Get latest tag from GitHub using GraphQL (ordered by commit date, not creation date)
+        latest_tag=$(gh api graphql -f query="{repository(owner: \"$GITHUB_ORG\", name: \"$repo_name\"){refs(refPrefix: \"refs/tags/\", first: 1, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}){nodes{name}}}}" --jq '.data.repository.refs.nodes[].name' 2>/dev/null)
         
         if [[ "$latest_tag" == "null" ]] || [[ -z "$latest_tag" ]]; then
             echo " ❌ Repository not found or no tags"
         elif [[ "$latest_tag" == "$current_version" ]]; then
             echo " ✅ Up to date"
         elif is_version_newer "$current_version" "$latest_tag"; then
-            echo " 🔄 Update available: $latest_tag"
+            # Check if it's a major version change
+            if is_major_version_change "$current_version" "$latest_tag"; then
+                echo " 🚨 MAJOR VERSION UPDATE: $latest_tag (BREAKING CHANGES LIKELY)"
+                major_version_changes=$((major_version_changes + 1))
+            else
+                echo " 🔄 Update available: $latest_tag"
+            fi
             updates_available=$((updates_available + 1))
         else
-            echo " ⚠️  Newer version available but appears to be older: $latest_tag"
+            # Check if current appears newer but it's actually a major version downgrade
+            if is_major_version_change "$latest_tag" "$current_version"; then
+                echo " 🚨 MAJOR VERSION DOWNGRADE: Current $current_version → Latest $latest_tag (REVIEW REQUIRED)"
+                major_version_changes=$((major_version_changes + 1))
+            else
+                echo " ⚠️  Newer version available but appears to be older: $latest_tag"
+            fi
         fi
         total_checked=$((total_checked + 1))
     fi
@@ -177,6 +213,14 @@ done <<< "$properties"
 
 echo "================================================================="
 echo "Summary: $updates_available updates available out of $total_checked dependencies checked"
+
+if [[ $major_version_changes -gt 0 ]]; then
+    echo ""
+    echo "⚠️  WARNING: $major_version_changes major version change(s) detected!"
+    echo "   Major version updates often include breaking changes."
+    echo "   Review release notes and changelog before upgrading."
+    echo "   Consider testing in a separate branch first."
+fi
 
 if [[ $updates_available -gt 0 ]]; then
     echo ""
