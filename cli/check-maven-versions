@@ -1,34 +1,90 @@
 #!/bin/bash
 
 # Script to check Maven pom.xml property versions against latest GitHub tags
-# Usage: check-maven-versions [path-to-pom.xml]
+# Usage: check-maven-versions [path-to-pom.xml] [--org organization] [--config config-file]
 
-POM_FILE=${1:-"pom.xml"}
+POM_FILE=""
+GITHUB_ORG=""
+CONFIG_FILE=""
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --org)
+            GITHUB_ORG="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: check-maven-versions [options] [path-to-pom.xml]"
+            echo ""
+            echo "Options:"
+            echo "  --org ORGANIZATION    GitHub organization name (e.g., 'Credify', 'microsoft')"
+            echo "  --config FILE         Configuration file with property->repo mappings"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  check-maven-versions --org Credify pom.xml"
+            echo "  check-maven-versions --org microsoft --config ./repo-mappings.txt pom.xml"
+            echo ""
+            echo "Config file format (one mapping per line):"
+            echo "  property-name=repository-name"
+            echo "  actor-srvc=actor-service"
+            echo "  financial-utils=financial-utilities"
+            exit 0
+            ;;
+        *)
+            if [[ -z "$POM_FILE" ]]; then
+                POM_FILE="$1"
+            else
+                echo "Error: Unexpected argument '$1'"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Set defaults
+POM_FILE=${POM_FILE:-"pom.xml"}
 
 if [[ ! -f "$POM_FILE" ]]; then
     echo "Error: pom.xml not found at $POM_FILE"
-    echo "Usage: check-maven-versions [path-to-pom.xml]"
+    echo "Run 'check-maven-versions --help' for usage information."
+    exit 1
+fi
+
+if [[ -z "$GITHUB_ORG" ]]; then
+    echo "Error: GitHub organization must be specified with --org"
+    echo "Run 'check-maven-versions --help' for usage information."
     exit 1
 fi
 
 echo "Checking Maven versions in $POM_FILE against latest GitHub tags..."
+echo "Organization: $GITHUB_ORG"
+if [[ -n "$CONFIG_FILE" ]]; then
+    echo "Config file: $CONFIG_FILE"
+fi
 echo "================================================================="
 
+# Load repository mappings from config file
 get_repo_name() {
     local prop_name="$1"
-    case "$prop_name" in
-        "actor-bankruptcy") echo "actor-bankruptcy-srvc" ;;
-        "actor-hardship-srvc") echo "actor-hardship-srvc" ;;
-        "actor-notification-message-lib") echo "actor-notification-message-lib" ;;
-        "actor-srvc") echo "actor-srvc" ;;
-        "financial-utils") echo "financial-utils" ;;
-        "spectrum-api-client") echo "spectrum-api-client" ;;
-        "loan-servicing-srvc") echo "loan-servicing-srvc" ;;
-        "bnpl-application") echo "bnpl-application" ;;
-        "loan-hardship-servicing-srvc") echo "loan-hardship-servicing-srvc" ;;
-        "creditline-hardship-servicing-srvc") echo "creditline-hardship-servicing-srvc" ;;
-        *) echo "$prop_name" ;;
-    esac
+    
+    # Check config file mappings first
+    if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+        local mapping=$(grep "^${prop_name}=" "$CONFIG_FILE" 2>/dev/null | head -1)
+        if [[ -n "$mapping" ]]; then
+            echo "${mapping#*=}" | xargs
+            return
+        fi
+    fi
+    
+    # Default: use property name as repository name
+    echo "$prop_name"
 }
 
 # Compare versions - returns 0 if v2 > v1, 1 otherwise
@@ -103,7 +159,7 @@ while IFS='=' read -r prop_name current_version; do
         printf "%-40s -> %-40s (current: %-20s)" "$base_name" "$repo_name" "$current_version"
         
         # Get latest tag from GitHub
-        latest_tag=$(gh api repos/Credify/$repo_name/tags --paginate 2>/dev/null | jq -r '.[0].name' 2>/dev/null)
+        latest_tag=$(gh api repos/$GITHUB_ORG/$repo_name/tags --paginate 2>/dev/null | jq -r '.[0].name' 2>/dev/null)
         
         if [[ "$latest_tag" == "null" ]] || [[ -z "$latest_tag" ]]; then
             echo " ❌ Repository not found or no tags"
