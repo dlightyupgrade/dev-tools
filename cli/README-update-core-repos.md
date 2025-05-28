@@ -42,7 +42,7 @@ pru -h
 
 ### Repository Config File
 
-Create a file at `~/code/project-list.txt` with repositories to update:
+Create a file at `~/.config/dev-tools/project-list.txt` with repositories to update:
 
 ```
 # Repositories to update (one per line)
@@ -55,7 +55,7 @@ example-service
 
 ### Rebase File
 
-Create a file at `~/code/to-rebase.txt` with branches to rebase:
+Create a file at `~/.config/dev-tools/to-rebase.txt` with branches to rebase:
 
 ```
 # Branch names to rebase (one per line)
@@ -70,6 +70,8 @@ example-repo-1:feature/ticket-456                   # Specific repo:branch
 Edit these variables at the top of the script to change defaults:
 
 ```bash
+# Configuration directory
+CONFIG_DIR="$HOME/.config/dev-tools"
 # Projects directory
 PROJECTS_DIR="$HOME/code"
 CONFIG_FILE_NAME="project-list.txt"
@@ -130,13 +132,13 @@ You can maintain multiple config files for different project groups:
 
 ```bash
 # Use a different repo config file
-pru ~/code/frontend-repos.txt
+pru ~/.config/dev-tools/frontend-repos.txt
 
 # Use a different rebase file
-pru -r ~/code/urgent-branches.txt
+pru -r ~/.config/dev-tools/urgent-branches.txt
 
 # Combine both
-pru -r ~/code/urgent-branches.txt ~/code/frontend-repos.txt
+pru -r ~/.config/dev-tools/urgent-branches.txt ~/.config/dev-tools/frontend-repos.txt
 ```
 
 ### CI/CD Integration
