@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# Script to check Maven pom.xml property versions against latest GitHub tags
+# Usage: check-maven-versions [path-to-pom.xml]
+
+POM_FILE=${1:-"pom.xml"}
+
+if [[ ! -f "$POM_FILE" ]]; then
+    echo "Error: pom.xml not found at $POM_FILE"
+    echo "Usage: check-maven-versions [path-to-pom.xml]"
+    exit 1
+fi
+
+echo "Checking Maven versions in $POM_FILE against latest GitHub tags..."
+echo "================================================================="
+
+get_repo_name() {
+    local prop_name="$1"
+    case "$prop_name" in
+        "actor-bankruptcy") echo "actor-bankruptcy-srvc" ;;
+        "actor-hardship-srvc") echo "actor-hardship-srvc" ;;
+        "actor-notification-message-lib") echo "actor-notification-message-lib" ;;
+        "actor-srvc") echo "actor-srvc" ;;
+        "financial-utils") echo "financial-utils" ;;
+        "spectrum-api-client") echo "spectrum-api-client" ;;
+        "loan-servicing-srvc") echo "loan-servicing-srvc" ;;
+        "bnpl-application") echo "bnpl-application" ;;
+        "loan-hardship-servicing-srvc") echo "loan-hardship-servicing-srvc" ;;
+        "creditline-hardship-servicing-srvc") echo "creditline-hardship-servicing-srvc" ;;
+        *) echo "$prop_name" ;;
+    esac
+}
+
+# Extract property definitions from pom.xml (skip java.version)
+properties=$(grep -E "^\s*<[^>]+\.version>" "$POM_FILE" | grep -v "java.version" | sed 's/[[:space:]]*<\([^>]*\)>\([^<]*\)<.*/\1=\2/')
+
+updates_available=0
+total_checked=0
+
+while IFS='=' read -r prop_name current_version; do
+    if [[ "$prop_name" == *".version" ]]; then
+        # Extract base name from property (remove .version suffix)  
+        base_name=${prop_name%.version}
+        
+        # Get repo name from mapping
+        repo_name=$(get_repo_name "$base_name")
+        
+        printf "%-40s -> %-40s (current: %-20s)" "$base_name" "$repo_name" "$current_version"
+        
+        # Get latest tag from GitHub
+        latest_tag=$(gh api repos/Credify/$repo_name/tags --paginate 2>/dev/null | jq -r '.[0].name' 2>/dev/null)
+        
+        if [[ "$latest_tag" == "null" ]] || [[ -z "$latest_tag" ]]; then
+            echo " ❌ Repository not found or no tags"
+        elif [[ "$latest_tag" == "$current_version" ]]; then
+            echo " ✅ Up to date"
+        else
+            echo " 🔄 Update available: $latest_tag"
+            updates_available=$((updates_available + 1))
+        fi
+        total_checked=$((total_checked + 1))
+    fi
+done <<< "$properties"
+
+echo "================================================================="
+echo "Summary: $updates_available updates available out of $total_checked dependencies checked"
+
+if [[ $updates_available -gt 0 ]]; then
+    echo ""
+    echo "To update versions, edit the pom.xml properties section manually or use a Maven dependency management tool."
+fi
