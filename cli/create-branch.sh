@@ -16,8 +16,9 @@ NC='\033[0m' # No Color
 
 # Configuration
 PROJECTS_DIR="$HOME/code"
+CONFIG_DIR="$HOME/.config/dev-tools"
 REBASE_FILE_NAME="to-rebase.txt"
-REBASE_FILE="$PROJECTS_DIR/$REBASE_FILE_NAME"
+REBASE_FILE="$CONFIG_DIR/$REBASE_FILE_NAME"
 BASE_BRANCH="master"
 
 # Show help if requested

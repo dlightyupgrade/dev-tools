@@ -6,6 +6,7 @@
 #===============================================================
 # Projects directory
 PROJECTS_DIR="$HOME/code"
+CONFIG_DIR="$HOME/.config/dev-tools"
 CONFIG_FILE_NAME="project-list.txt"
 REBASE_FILE_NAME="to-rebase.txt"
 
@@ -88,7 +89,7 @@ usage() {
   echo "  -f, --force     Force rebase even if master didn't change"
   echo "  -h, --help      Display this help message"
   echo ""
-  echo "If CONFIG_FILE is not specified, defaults to $PROJECTS_DIR/$CONFIG_FILE_NAME"
+  echo "If CONFIG_FILE is not specified, defaults to $CONFIG_DIR/$CONFIG_FILE_NAME"
   echo "The config file should contain repository paths to update, one per line."
   echo "Lines starting with '#' are treated as comments."
   echo "The rebase file contains branch names to rebase, one per line."
@@ -124,8 +125,8 @@ while [ "$#" -gt 0 ]; do
       ;;
     -g|--generate)
       # Generate example config files and exit
-      CONFIG_FILE_PATH="$PROJECTS_DIR/$CONFIG_FILE_NAME"
-      REBASE_FILE_PATH="$PROJECTS_DIR/$REBASE_FILE_NAME"
+      CONFIG_FILE_PATH="$CONFIG_DIR/$CONFIG_FILE_NAME"
+      REBASE_FILE_PATH="$CONFIG_DIR/$REBASE_FILE_NAME"
       create_example_files "$CONFIG_FILE_PATH" "$REBASE_FILE_PATH"
       echo -e "${GREEN}Example config files created. Edit them as needed and run the script again.${NC}"
       exit 0
@@ -151,8 +152,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 # File containing repositories to update
-CONFIG_FILE="${CONFIG_FILE_ARG:-$PROJECTS_DIR/$CONFIG_FILE_NAME}"
-REBASE_FILE="${REBASE_FILE_ARG:-$PROJECTS_DIR/$REBASE_FILE_NAME}"
+CONFIG_FILE="${CONFIG_FILE_ARG:-$CONFIG_DIR/$CONFIG_FILE_NAME}"
+REBASE_FILE="${REBASE_FILE_ARG:-$CONFIG_DIR/$REBASE_FILE_NAME}"
 
 # Create example files if they don't exist
 create_example_files "$CONFIG_FILE" "$REBASE_FILE"

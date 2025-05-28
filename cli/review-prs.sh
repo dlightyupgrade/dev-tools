@@ -32,7 +32,9 @@ DAILY_NOTE="$DAILY_NOTE_DIR/$TODAY.md"
 TEMPLATE_FILE="$PROJECT_DIR/daily-note-template.txt"
 
 # Config file options
+CONFIG_DIR="$HOME/.config/dev-tools"
 CONFIGS=(
+  "$CONFIG_DIR/project-list.txt"
   "$PROJECT_DIR/project-list.txt"
   "$DIR/project-list.txt"
 )
