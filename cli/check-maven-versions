@@ -31,6 +31,61 @@ get_repo_name() {
     esac
 }
 
+# Compare versions - returns 0 if v2 > v1, 1 otherwise
+is_version_newer() {
+    local current="$1"
+    local latest="$2"
+    
+    # Handle same versions
+    if [[ "$current" == "$latest" ]]; then
+        return 1
+    fi
+    
+    # Remove 'v' prefix if present for comparison
+    local current_clean="${current#v}"
+    local latest_clean="${latest#v}"
+    
+    # If both are timestamp-based versions (YYYYMMDDHHMMSS-hash format)
+    if [[ "$current_clean" =~ ^[0-9]{14}-[a-f0-9]+$ ]] && [[ "$latest_clean" =~ ^[0-9]{14}-[a-f0-9]+$ ]]; then
+        # Extract timestamps for comparison
+        local current_ts="${current_clean%-*}"
+        local latest_ts="${latest_clean%-*}"
+        
+        if [[ "$latest_ts" > "$current_ts" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # If both are semantic versions (x.y.z format)
+    if [[ "$current_clean" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$latest_clean" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # Use sort -V for version comparison
+        if [[ "$(printf '%s\n%s\n' "$current_clean" "$latest_clean" | sort -V | tail -n1)" == "$latest_clean" ]] && [[ "$current_clean" != "$latest_clean" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # If both are numeric versions (x.y format)  
+    if [[ "$current_clean" =~ ^[0-9]+\.[0-9]+$ ]] && [[ "$latest_clean" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        # Use sort -V for version comparison
+        if [[ "$(printf '%s\n%s\n' "$current_clean" "$latest_clean" | sort -V | tail -n1)" == "$latest_clean" ]] && [[ "$current_clean" != "$latest_clean" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # Mixed version types or unrecognized formats - use lexicographical comparison as fallback
+    if [[ "$latest_clean" > "$current_clean" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # Extract property definitions from pom.xml (skip java.version)
 properties=$(grep -E "^\s*<[^>]+\.version>" "$POM_FILE" | grep -v "java.version" | sed 's/[[:space:]]*<\([^>]*\)>\([^<]*\)<.*/\1=\2/')
 
@@ -54,9 +109,11 @@ while IFS='=' read -r prop_name current_version; do
             echo " ❌ Repository not found or no tags"
         elif [[ "$latest_tag" == "$current_version" ]]; then
             echo " ✅ Up to date"
-        else
+        elif is_version_newer "$current_version" "$latest_tag"; then
             echo " 🔄 Update available: $latest_tag"
             updates_available=$((updates_available + 1))
+        else
+            echo " ⚠️  Newer version available but appears to be older: $latest_tag"
         fi
         total_checked=$((total_checked + 1))
     fi
