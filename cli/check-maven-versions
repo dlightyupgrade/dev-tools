@@ -1,0 +1,184 @@
+#!/bin/bash
+
+# Script to check Maven pom.xml property versions against latest GitHub tags
+# Usage: check-maven-versions [path-to-pom.xml] [--org organization] [--config config-file]
+
+POM_FILE=""
+GITHUB_ORG=""
+CONFIG_FILE=""
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --org)
+            GITHUB_ORG="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: check-maven-versions [options] [path-to-pom.xml]"
+            echo ""
+            echo "Options:"
+            echo "  --org ORGANIZATION    GitHub organization name (e.g., 'microsoft', 'apache')"
+            echo "  --config FILE         Configuration file with property->repo mappings"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  check-maven-versions --org mycompany pom.xml"
+            echo "  check-maven-versions --org apache --config ./repo-mappings.txt pom.xml"
+            echo ""
+            echo "Config file format (one mapping per line):"
+            echo "  property-name=repository-name"
+            echo "  auth-service=authentication-service"
+            echo "  data-utils=data-utilities"
+            exit 0
+            ;;
+        *)
+            if [[ -z "$POM_FILE" ]]; then
+                POM_FILE="$1"
+            else
+                echo "Error: Unexpected argument '$1'"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Set defaults
+POM_FILE=${POM_FILE:-"pom.xml"}
+
+if [[ ! -f "$POM_FILE" ]]; then
+    echo "Error: pom.xml not found at $POM_FILE"
+    echo "Run 'check-maven-versions --help' for usage information."
+    exit 1
+fi
+
+if [[ -z "$GITHUB_ORG" ]]; then
+    echo "Error: GitHub organization must be specified with --org"
+    echo "Run 'check-maven-versions --help' for usage information."
+    exit 1
+fi
+
+echo "Checking Maven versions in $POM_FILE against latest GitHub tags..."
+echo "Organization: $GITHUB_ORG"
+if [[ -n "$CONFIG_FILE" ]]; then
+    echo "Config file: $CONFIG_FILE"
+fi
+echo "================================================================="
+
+# Load repository mappings from config file
+get_repo_name() {
+    local prop_name="$1"
+    
+    # Check config file mappings first
+    if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+        local mapping=$(grep "^${prop_name}=" "$CONFIG_FILE" 2>/dev/null | head -1)
+        if [[ -n "$mapping" ]]; then
+            echo "${mapping#*=}" | xargs
+            return
+        fi
+    fi
+    
+    # Default: use property name as repository name
+    echo "$prop_name"
+}
+
+# Compare versions - returns 0 if v2 > v1, 1 otherwise
+is_version_newer() {
+    local current="$1"
+    local latest="$2"
+    
+    # Handle same versions
+    if [[ "$current" == "$latest" ]]; then
+        return 1
+    fi
+    
+    # Remove 'v' prefix if present for comparison
+    local current_clean="${current#v}"
+    local latest_clean="${latest#v}"
+    
+    # If both are timestamp-based versions (YYYYMMDDHHMMSS-hash format)
+    if [[ "$current_clean" =~ ^[0-9]{14}-[a-f0-9]+$ ]] && [[ "$latest_clean" =~ ^[0-9]{14}-[a-f0-9]+$ ]]; then
+        # Extract timestamps for comparison
+        local current_ts="${current_clean%-*}"
+        local latest_ts="${latest_clean%-*}"
+        
+        if [[ "$latest_ts" > "$current_ts" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # If both are semantic versions (x.y.z format)
+    if [[ "$current_clean" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$latest_clean" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # Use sort -V for version comparison
+        if [[ "$(printf '%s\n%s\n' "$current_clean" "$latest_clean" | sort -V | tail -n1)" == "$latest_clean" ]] && [[ "$current_clean" != "$latest_clean" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # If both are numeric versions (x.y format)  
+    if [[ "$current_clean" =~ ^[0-9]+\.[0-9]+$ ]] && [[ "$latest_clean" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        # Use sort -V for version comparison
+        if [[ "$(printf '%s\n%s\n' "$current_clean" "$latest_clean" | sort -V | tail -n1)" == "$latest_clean" ]] && [[ "$current_clean" != "$latest_clean" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # Mixed version types or unrecognized formats - use lexicographical comparison as fallback
+    if [[ "$latest_clean" > "$current_clean" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Extract property definitions from pom.xml (skip java.version)
+properties=$(grep -E "^\s*<[^>]+\.version>" "$POM_FILE" | grep -v "java.version" | sed 's/[[:space:]]*<\([^>]*\)>\([^<]*\)<.*/\1=\2/')
+
+updates_available=0
+total_checked=0
+
+while IFS='=' read -r prop_name current_version; do
+    if [[ "$prop_name" == *".version" ]]; then
+        # Extract base name from property (remove .version suffix)  
+        base_name=${prop_name%.version}
+        
+        # Get repo name from mapping
+        repo_name=$(get_repo_name "$base_name")
+        
+        printf "%-40s -> %-40s (current: %-20s)" "$base_name" "$repo_name" "$current_version"
+        
+        # Get latest tag from GitHub
+        latest_tag=$(gh api repos/$GITHUB_ORG/$repo_name/tags --paginate 2>/dev/null | jq -r '.[0].name' 2>/dev/null)
+        
+        if [[ "$latest_tag" == "null" ]] || [[ -z "$latest_tag" ]]; then
+            echo " ❌ Repository not found or no tags"
+        elif [[ "$latest_tag" == "$current_version" ]]; then
+            echo " ✅ Up to date"
+        elif is_version_newer "$current_version" "$latest_tag"; then
+            echo " 🔄 Update available: $latest_tag"
+            updates_available=$((updates_available + 1))
+        else
+            echo " ⚠️  Newer version available but appears to be older: $latest_tag"
+        fi
+        total_checked=$((total_checked + 1))
+    fi
+done <<< "$properties"
+
+echo "================================================================="
+echo "Summary: $updates_available updates available out of $total_checked dependencies checked"
+
+if [[ $updates_available -gt 0 ]]; then
+    echo ""
+    echo "To update versions, edit the pom.xml properties section manually or use a Maven dependency management tool."
+fi
