@@ -21,6 +21,7 @@ Tools for managing multiple repositories and streamlining development workflows.
 
 - `cli/update-core-repos.sh` - Update multiple repositories, pulling latest master and rebasing branches
 - `cli/review-prs.sh` - Script for reviewing and managing pull requests
+- `cli/check-maven-versions` - Check and update Maven dependency versions 
 
 [Read more about the Repo Updater](cli/README-update-core-repos.md)
 
@@ -47,6 +48,8 @@ Tools for managing multiple repositories and streamlining development workflows.
    alias -g ggc="~/code/personal-dev-tools/cli/llm_commit"
    alias -g ggpr="~/code/personal-dev-tools/cli/llm_pr"
    alias -g lsu="~/code/personal-dev-tools/cli/llm_setup"
+   # Maven Dep Version Checker
+   alias -g check-maven-versions="~/code/personal-dev-tools/cli/check-maven-versions"
    # Repo update script
    alias -g pru="~/code/personal-dev-tools/cli/update-core-repos.sh"
    # Claude integration
