@@ -1,19 +1,57 @@
 #!/bin/bash
 
-# Check PR Violations - Extract Tekton/Checkstyle violations from GitHub PR comments
-# Usage: check-pr-violations <pr-number> [repository]
+# Check PR Violations - Extract linter/CI violations from GitHub PR comments
+# Usage: check-pr-violations <pr-number> [owner/repository] [--claude]
 
 set -e
 
-# Default repository if not provided
-REPO="${2:-$(basename $(git remote get-url origin) .git)}"
-OWNER="Credify"
+# Parse arguments
 PR_NUMBER="$1"
+REPO_PARAM="$2"
+CLAUDE_MODE="$3"
 
-if [ -z "$PR_NUMBER" ]; then
-    echo "Usage: check-pr-violations <pr-number> [repository]"
-    echo "Example: check-pr-violations 2182"
-    echo "Example: check-pr-violations 2182 creditline-hardship-servicing-srvc"
+# Auto-detect repository if not provided
+if [ -z "$REPO_PARAM" ] || [[ "$REPO_PARAM" == "--claude" ]]; then
+    if [ "$REPO_PARAM" == "--claude" ]; then
+        CLAUDE_MODE="--claude"
+    fi
+    # Try to detect from git remote
+    if git remote get-url origin &>/dev/null; then
+        REMOTE_URL=$(git remote get-url origin)
+        if [[ "$REMOTE_URL" =~ github\.com[:/]([^/]+)/([^/.]+) ]]; then
+            OWNER="${BASH_REMATCH[1]}"
+            REPO="${BASH_REMATCH[2]}"
+        else
+            echo "❌ Could not parse GitHub URL from git remote"
+            exit 1
+        fi
+    else
+        echo "❌ Not in a git repository and no repository specified"
+        exit 1
+    fi
+else
+    # Parse owner/repo format
+    if [[ "$REPO_PARAM" =~ ^([^/]+)/(.+)$ ]]; then
+        OWNER="${BASH_REMATCH[1]}"
+        REPO="${BASH_REMATCH[2]}"
+    else
+        # Assume just repo name with default owner
+        OWNER="$(git config --get remote.origin.url | sed -n 's/.*github\.com[:/]\([^/]*\)\/.*/\1/p' 2>/dev/null || echo "OWNER")"
+        REPO="$REPO_PARAM"
+    fi
+fi
+
+if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" == "--help" ] || [ "$PR_NUMBER" == "-h" ]; then
+    echo "Usage: check-pr-violations <pr-number> [owner/repository] [--claude]"
+    echo ""
+    echo "Examples:"
+    echo "  check-pr-violations 2182                    # Auto-detect repo"
+    echo "  check-pr-violations 2182 myorg/myrepo       # Specify repo"
+    echo "  check-pr-violations 2182 --claude           # Auto-detect + Claude todo mode"
+    echo "  check-pr-violations 2182 myorg/myrepo --claude"
+    echo ""
+    echo "Options:"
+    echo "  --claude    Generate todo list for violations (requires Claude Code)"
     exit 1
 fi
 
@@ -21,22 +59,56 @@ echo "🔍 Checking PR #$PR_NUMBER in $OWNER/$REPO for violations..."
 echo ""
 
 # Get inline comments that contain violation reports
-VIOLATIONS=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r '
-    .[] | 
+VIOLATIONS_JSON=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r '
+    [.[] | 
     select(.body | contains("**Reporter**")) | 
     {
         file: .path,
         line: (.original_line // .line),
-        body: .body
-    } |
-    "📁 File: \(.file)\n📍 Line: \(.line)\n⚠️  Severity: \(.body | match("\\*\\*Severity\\*\\*: ([A-Z]+)"; "g").captures[0].string)\n🔧 Rule: \(.body | match("\\*\\*Rule\\*\\*: ([^\n]+)"; "g").captures[0].string)\n💬 Message: \(.body | split("\n") | .[5] // "Unable to extract message")\n" + ("─" * 80)
+        severity: (.body | match("\\*\\*Severity\\*\\*: ([A-Z]+)"; "g").captures[0].string // "UNKNOWN"),
+        rule: (.body | match("\\*\\*Rule\\*\\*: ([^\n]+)"; "g").captures[0].string // "Unknown rule"),
+        message: (.body | split("\n") | .[5] // "Unable to extract message"),
+        reporter: (.body | match("\\*\\*Reporter\\*\\*: ([^\n]+)"; "g").captures[0].string // "Unknown")
+    }]
 ')
 
-if [ -z "$VIOLATIONS" ]; then
+VIOLATIONS_COUNT=$(echo "$VIOLATIONS_JSON" | jq 'length')
+
+if [ "$VIOLATIONS_COUNT" -eq 0 ]; then
     echo "✅ No violations found in PR #$PR_NUMBER"
-else
-    echo "$VIOLATIONS"
+    if [ "$CLAUDE_MODE" == "--claude" ]; then
+        echo ""
+        echo "🤖 No todo items needed - PR is clean!"
+    fi
+    exit 0
+fi
+
+# Display violations in human-readable format
+echo "$VIOLATIONS_JSON" | jq -r '.[] | 
+    "📁 File: \(.file)\n📍 Line: \(.line)\n⚠️  Severity: \(.severity)\n🔧 Rule: \(.rule)\n🤖 Reporter: \(.reporter)\n💬 Message: \(.message)\n" + ("─" * 80)'
+
+echo ""
+echo "📊 Summary: Found $VIOLATIONS_COUNT violation(s)"
+
+# Claude mode - generate todo list
+if [ "$CLAUDE_MODE" == "--claude" ]; then
     echo ""
-    echo "📊 Summary:"
-    echo "   Found $(echo "$VIOLATIONS" | grep -c "📁 File:") violation(s)"
+    echo "🤖 Generating todo list for Claude Code..."
+    echo ""
+    echo "Please create the following todos to fix these violations:"
+    echo ""
+    
+    echo "$VIOLATIONS_JSON" | jq -r 'to_entries | .[] | 
+        "TODO #\(.key + 1): Fix \(.value.severity | ascii_downcase) - \(.value.message | gsub("\\.$"; "")) in \(.value.file | split("/") | .[-1]) line \(.value.line)"' | 
+    while read -r todo; do
+        echo "  $todo"
+    done
+    
+    echo ""
+    echo "💡 Suggested workflow:"
+    echo "   1. Create todos using TodoWrite tool"
+    echo "   2. Mark each todo as 'in_progress' when working on it" 
+    echo "   3. Fix the violation in the specified file/line"
+    echo "   4. Mark todo as 'completed' when fixed"
+    echo "   5. Re-run this script to verify all violations are resolved"
 fi
