@@ -1,594 +1,724 @@
 #!/bin/bash
-
+set -euo pipefail
 
 #===============================================================
-# CONFIGURATION
+# CONFIGURATION & CONSTANTS
 #===============================================================
-# Projects directory
-PROJECTS_DIR="$HOME/code"
-CONFIG_DIR="$HOME/.config/dev-tools"
-CONFIG_FILE_NAME="project-list.txt"
-REBASE_FILE_NAME="to-rebase.txt"
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="3.0.3"
+readonly PROJECTS_DIR="$HOME/code"
+readonly CONFIG_DIR="$HOME/.config/dev-tools"
+readonly CONFIG_FILE_NAME="project-list.txt"
+readonly REBASE_FILE_NAME="to-rebase.txt"
+readonly BASE_BRANCH="master"
+readonly PROTECTED_BRANCHES=("master" "main")
 
-# Base branch to pull from (typically 'master' or 'main')
-BASE_BRANCH="master"
-
-# Set to 'true' to ask for confirmation before switching branches
+# Runtime settings
 ASK_BEFORE_SWITCH="false"
-
-# Set to 'true' to force push successfully rebased branches to origin
 FORCE_PUSH="true"
-
-# Set to 'true' to prompt for deleting local branches without tracking remote
 CLEAN_BRANCHES="true"
-
-# Set to 'true' to force rebase even if master didn't change
 FORCE_REBASE="false"
+VERBOSE="false"
 
-# Repositories will be loaded from config file
+# Colors - initialize early
+if [[ -t 1 ]]; then
+    GREEN='\033[0;32m'
+    RED='\033[0;31m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    GREEN=''
+    RED=''
+    YELLOW=''
+    BLUE=''
+    BOLD=''
+    NC=''
+fi
+
+# Global arrays for results (bash 3 compatible)
+REPOS=()
+SUCCESS_REPOS=()
+FAILED_REPOS=()
+REPO_RESULTS=()
+REPO_NAMES=()
 
 #===============================================================
-# SCRIPT LOGIC
+# UTILITIES & ERROR HANDLING
 #===============================================================
+setup_environment() {
+    # Trap for cleanup on exit
+    trap cleanup_on_exit EXIT
+    trap 'log_error "Interrupted by user"; exit 130' INT TERM
+    
+    # Create temp directory for parallel processing
+    readonly TEMP_DIR="$(mktemp -d -t "${SCRIPT_NAME}.XXXXXX")"
+}
 
-# Colors for output
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[0;33m'
-NC='\033[0m' # No Color
+cleanup_on_exit() {
+    [[ -d "${TEMP_DIR:-}" ]] && rm -rf "$TEMP_DIR" 2>/dev/null || true
+    # Clear any background jobs
+    jobs -p | xargs -r kill 2>/dev/null || true
+}
 
-# Function to create example config files if needed
-create_example_files() {
-  local config_path="$1"
-  local rebase_path="$2"
-  
-  # Create example config file if it doesn't exist
-  if [ ! -f "$config_path" ]; then
-    echo -e "${YELLOW}Creating example config file at $config_path${NC}"
-    mkdir -p "$(dirname "$config_path")"
-    cat > "$config_path" << EOF
-# Configuration file for update-core-repos.sh
-# List repositories to update, one per line
-# You can use relative paths (from $PROJECTS_DIR) or absolute paths
-# Lines starting with # are treated as comments
+# Simple, always-visible logging
+log_info() { 
+    printf "%b%s%b\n" "$GREEN" "$1" "$NC"
+}
+
+log_warn() { 
+    printf "%b%s%b\n" "$YELLOW" "$1" "$NC" >&2
+}
+
+log_error() { 
+    printf "%b%s%b\n" "$RED" "$1" "$NC" >&2
+}
+
+log_debug() { 
+    [[ "$VERBOSE" == "true" ]] && printf "%b[DEBUG] %s%b\n" "$BLUE" "$1" "$NC" >&2 || true
+}
+
+# Simple progress for default mode
+show_repo_progress() {
+    local current="$1" total="$2" repo_name="$3"
+    printf "%b[%d/%d]%b Processing %s...\n" "$BOLD" "$current" "$total" "$NC" "$repo_name"
+}
+
+#===============================================================
+# CONFIGURATION MANAGEMENT (BASH 3 COMPATIBLE)
+#===============================================================
+validate_config() {
+    local config_file="$1"
+    
+    [[ ! -f "$config_file" ]] && {
+        log_error "Configuration file not found: $config_file"
+        log_info "Run with --generate to create example files"
+        return 1
+    }
+    
+    [[ ! -r "$config_file" ]] && {
+        log_error "Cannot read configuration file: $config_file"
+        return 1
+    }
+    
+    # Check for empty config
+    if ! grep -q '^[^#[:space:]]' "$config_file" 2>/dev/null; then
+        log_error "Configuration file is empty or contains only comments"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Load repositories - bash 3 compatible approach
+load_repositories() {
+    local config_file="$1"
+    local invalid_count=0
+    
+    validate_config "$config_file" || return 1
+    
+    # Clear global array
+    REPOS=()
+    
+    # Process each line
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Clean the line
+        line="${line#"${line%%[![:space:]]*}"}"  # ltrim
+        line="${line%"${line##*[![:space:]]}"}"  # rtrim
+        
+        # Resolve path
+        local repo_path
+        if [[ "$line" == /* ]]; then
+            repo_path="$line"
+        else
+            repo_path="$PROJECTS_DIR/$line"
+        fi
+        
+        # Validate repository
+        if [[ -d "$repo_path" ]]; then
+            if [[ -d "$repo_path/.git" ]]; then
+                REPOS+=("$repo_path")
+                log_debug "Added repository: $repo_path"
+            else
+                log_warn "Skipping $repo_path (not a git repository)"
+                ((invalid_count++))
+            fi
+        else
+            log_warn "Skipping $repo_path (directory not found)"
+            ((invalid_count++))
+        fi
+    done < "$config_file"
+    
+    if [[ ${#REPOS[@]} -eq 0 ]]; then
+        log_error "No valid repositories found in configuration"
+        return 1
+    fi
+    
+    [[ $invalid_count -gt 0 ]] && log_warn "Skipped $invalid_count invalid repository paths"
+    log_debug "Loaded ${#REPOS[@]} valid repositories"
+    return 0
+}
+
+# Load branches for a specific repository
+load_branches_for_repo() {
+    local rebase_file="$1"
+    local repo_name="$2"
+    local result_file="$3"
+    
+    [[ ! -f "$rebase_file" ]] && return 0
+    
+    # Clear result file
+    > "$result_file"
+    
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        if [[ "$line" == "$repo_name:"* ]]; then
+            local branch="${line#*:}"
+            is_protected_branch "$branch" || echo "$branch" >> "$result_file"
+        elif [[ "$line" != *":"* ]]; then
+            is_protected_branch "$line" || echo "$line" >> "$result_file"
+        fi
+    done < "$rebase_file"
+}
+
+is_protected_branch() {
+    local branch="$1"
+    for protected in "${PROTECTED_BRANCHES[@]}"; do
+        [[ "$branch" == "$protected" ]] && return 0
+    done
+    return 1
+}
+
+#===============================================================
+# GIT OPERATIONS
+#===============================================================
+git_check_repo() {
+    local repo_path="$1"
+    local state_file="$2"
+    
+    cd "$repo_path" || return 1
+    
+    # Check git repository health
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "ERROR:Invalid git repository" > "$state_file"
+        return 1
+    fi
+    
+    # Get repository state
+    local current_branch has_changes
+    current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
+    
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+        has_changes="true"
+    else
+        has_changes="false"
+    fi
+    
+    # Write state to file
+    cat > "$state_file" << EOF
+current_branch=$current_branch
+initial_branch=$current_branch
+has_changes=$has_changes
+stash_created=false
+master_updated=false
+EOF
+    
+    return 0
+}
+
+git_update_repo() {
+    local repo_path="$1"
+    local repo_name="$2"
+    local state_file="$3"
+    
+    cd "$repo_path" || return 1
+    
+    # Source state
+    source "$state_file"
+    
+    # Handle stashing
+    if [[ "$has_changes" == "true" ]]; then
+        [[ "$VERBOSE" == "true" ]] && printf "  Stashing changes in %s...\n" "$repo_name"
+        local stash_message="auto-stash-pru-$(date +%s)"
+        if git stash push -m "$stash_message" --include-untracked --quiet 2>/dev/null; then
+            # Use a more portable approach to update the state file
+            cat > "$state_file" << EOF
+current_branch=$current_branch
+initial_branch=$initial_branch
+has_changes=$has_changes
+stash_created=true
+master_updated=$master_updated
+EOF
+            log_debug "[$repo_name] Stashed working changes"
+        else
+            log_warn "[$repo_name] Failed to stash changes"
+            return 1
+        fi
+    fi
+    
+    # Fetch and update base branch
+    [[ "$VERBOSE" == "true" ]] && printf "  Fetching %s from origin...\n" "$repo_name"
+    git fetch origin --quiet --prune 2>/dev/null || {
+        log_error "[$repo_name] Failed to fetch from origin"
+        return 1
+    }
+    
+    # Switch to base branch if needed
+    if [[ "$current_branch" != "$BASE_BRANCH" ]]; then
+        [[ "$VERBOSE" == "true" ]] && printf "  Switching to %s branch...\n" "$BASE_BRANCH"
+        git checkout "$BASE_BRANCH" --quiet 2>/dev/null || {
+            log_error "[$repo_name] Failed to checkout $BASE_BRANCH"
+            return 1
+        }
+    fi
+    
+    # Pull latest changes
+    local before_hash after_hash
+    before_hash="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
+    
+    if git pull origin "$BASE_BRANCH" --quiet --ff-only 2>/dev/null; then
+        after_hash="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
+        
+        if [[ "$before_hash" != "$after_hash" ]]; then
+            # Update state file
+            cat > "$state_file" << EOF
+current_branch=$current_branch
+initial_branch=$initial_branch
+has_changes=$has_changes
+stash_created=$stash_created
+master_updated=true
+EOF
+            [[ "$VERBOSE" == "true" ]] && printf "  %s branch updated\n" "$BASE_BRANCH"
+        else
+            [[ "$VERBOSE" == "true" ]] && printf "  %s already up to date\n" "$BASE_BRANCH"
+        fi
+    else
+        log_error "[$repo_name] Failed to update $BASE_BRANCH"
+        return 1
+    fi
+    
+    return 0
+}
+
+git_rebase_branches() {
+    local repo_path="$1"
+    local repo_name="$2"
+    local state_file="$3"
+    local branches_file="$4"
+    local result_file="$5"
+    
+    cd "$repo_path" || return 1
+    
+    # Source state
+    source "$state_file"
+    
+    # Initialize results
+    local success_branches=() failed_branches=() skipped_branches=()
+    
+    # Process each branch
+    if [[ -f "$branches_file" ]] && [[ -s "$branches_file" ]]; then
+        while IFS= read -r branch; do
+            [[ -z "$branch" ]] && continue
+            
+            # Skip if master wasn't updated (unless forced)
+            if [[ "$master_updated" == "false" && "$FORCE_REBASE" == "false" ]]; then
+                skipped_branches+=("$branch")
+                continue
+            fi
+            
+            # Check if branch exists and rebase
+            if git show-ref --verify --quiet refs/heads/"$branch" 2>/dev/null; then
+                [[ "$VERBOSE" == "true" ]] && printf "  Rebasing %s on %s...\n" "$branch" "$BASE_BRANCH"
+                if git checkout "$branch" --quiet 2>/dev/null && 
+                   git rebase "$BASE_BRANCH" --quiet 2>/dev/null; then
+                    
+                    # Handle push if enabled
+                    if [[ "$FORCE_PUSH" == "true" ]]; then
+                        [[ "$VERBOSE" == "true" ]] && printf "  Pushing %s to origin...\n" "$branch"
+                        if git push origin "$branch" --force --quiet 2>/dev/null; then
+                            success_branches+=("$branch")
+                            [[ "$VERBOSE" == "true" ]] && printf "  ✓ Successfully rebased and pushed %s\n" "$branch"
+                        else
+                            success_branches+=("$branch(push-failed)")
+                            [[ "$VERBOSE" == "true" ]] && printf "  ✓ Rebased %s but push failed\n" "$branch"
+                        fi
+                    else
+                        success_branches+=("$branch")
+                        [[ "$VERBOSE" == "true" ]] && printf "  ✓ Successfully rebased %s\n" "$branch"
+                    fi
+                else
+                    git rebase --abort --quiet 2>/dev/null || true
+                    failed_branches+=("$branch")
+                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Failed to rebase %s (conflicts)\n" "$branch"
+                fi
+            else
+                skipped_branches+=("$branch(not-found)")
+                [[ "$VERBOSE" == "true" ]] && printf "  • Skipped %s (branch not found)\n" "$branch"
+            fi
+        done < "$branches_file"
+    fi
+    
+    # Write results - handle empty arrays properly
+    local success_list failed_list skipped_list
+    if [[ ${#success_branches[@]} -gt 0 ]]; then
+        success_list=$(IFS=,; echo "${success_branches[*]}")
+    else
+        success_list=""
+    fi
+    
+    if [[ ${#failed_branches[@]} -gt 0 ]]; then
+        failed_list=$(IFS=,; echo "${failed_branches[*]}")
+    else
+        failed_list=""
+    fi
+    
+    if [[ ${#skipped_branches[@]} -gt 0 ]]; then
+        skipped_list=$(IFS=,; echo "${skipped_branches[*]}")
+    else
+        skipped_list=""
+    fi
+    
+    printf "SUCCESS:%s|FAILED:%s|SKIPPED:%s|UPDATED:%s|STASHED:%s\n" \
+        "$success_list" "$failed_list" "$skipped_list" \
+        "$master_updated" "$stash_created" > "$result_file"
+    
+    # Return failure if any branches failed
+    [[ ${#failed_branches[@]} -eq 0 ]]
+}
+
+git_restore_state() {
+    local repo_path="$1"
+    local repo_name="$2"
+    local state_file="$3"
+    
+    cd "$repo_path" || return 1
+    
+    # Source state
+    source "$state_file"
+    
+    # Restore original branch if changed
+    if [[ "$current_branch" != "$initial_branch" ]]; then
+        if git checkout "$initial_branch" --quiet 2>/dev/null; then
+            log_debug "[$repo_name] Restored to $initial_branch"
+        else
+            log_error "[$repo_name] Failed to restore original branch: $initial_branch"
+        fi
+    fi
+    
+    # Restore stashed changes
+    if [[ "$stash_created" == "true" ]]; then
+        if git stash pop --quiet 2>/dev/null; then
+            log_debug "[$repo_name] Restored stashed changes"
+        else
+            log_error "[$repo_name] Failed to restore stashed changes - check manually"
+        fi
+    fi
+}
+
+#===============================================================
+# MAIN PROCESSING
+#===============================================================
+process_single_repository() {
+    local repo_path="$1"
+    local repo_name="$(basename "$repo_path")"
+    local work_dir="$TEMP_DIR/$repo_name"
+    
+    # Create working directory
+    mkdir -p "$work_dir"
+    
+    local state_file="$work_dir/state"
+    local branches_file="$work_dir/branches"
+    local result_file="$work_dir/result"
+    
+    # Initialize and check repository
+    if ! git_check_repo "$repo_path" "$state_file"; then
+        echo "ERROR:Repository validation failed" > "$result_file"
+        return 1
+    fi
+    
+    # Update repository
+    if ! git_update_repo "$repo_path" "$repo_name" "$state_file"; then
+        echo "ERROR:Git update failed" > "$result_file"
+        git_restore_state "$repo_path" "$repo_name" "$state_file"
+        return 1
+    fi
+    
+    # Load branches to rebase
+    load_branches_for_repo "$REBASE_FILE" "$repo_name" "$branches_file"
+    
+    # Rebase branches
+    if ! git_rebase_branches "$repo_path" "$repo_name" "$state_file" "$branches_file" "$result_file"; then
+        git_restore_state "$repo_path" "$repo_name" "$state_file"
+        return 1
+    fi
+    
+    # Restore state
+    git_restore_state "$repo_path" "$repo_name" "$state_file"
+    cd - >/dev/null 2>&1
+    
+    return 0
+}
+
+execute_repositories() {
+    local total_repos="${#REPOS[@]}"
+    local completed=0
+    
+    printf "Processing %d repositories...\n\n" "$total_repos"
+    
+    # Clear global result arrays
+    SUCCESS_REPOS=()
+    FAILED_REPOS=()
+    REPO_RESULTS=()
+    REPO_NAMES=()
+    
+    # Process each repository
+    for repo in "${REPOS[@]}"; do
+        local repo_name="$(basename "$repo")"
+        ((completed++))
+        
+        show_repo_progress "$completed" "$total_repos" "$repo_name"
+        
+        if process_single_repository "$repo"; then
+            SUCCESS_REPOS+=("$repo_name")
+            printf "  %b✓%b Done\n" "$GREEN" "$NC"
+        else
+            FAILED_REPOS+=("$repo_name")
+            printf "  %b✗%b Failed\n" "$RED" "$NC"
+        fi
+        
+        # Store result
+        local result_file="$TEMP_DIR/$repo_name/result"
+        if [[ -f "$result_file" ]]; then
+            REPO_RESULTS+=("$(cat "$result_file")")
+        else
+            REPO_RESULTS+=("ERROR:Result file not found")
+        fi
+        REPO_NAMES+=("$repo_name")
+        
+        # Add spacing between repos unless it's the last one
+        [[ $completed -lt $total_repos ]] && echo
+    done
+}
+
+#===============================================================
+# OUTPUT FORMATTING
+#===============================================================
+format_result() {
+    local result="$1"
+    
+    if [[ "$result" == ERROR:* ]]; then
+        echo "$result"
+        return
+    fi
+    
+    # Parse result components
+    IFS='|' read -r success failed skipped updated stashed <<< "$result"
+    
+    local output="${BASE_BRANCH}"
+    [[ "${updated#*:}" == "true" ]] && output+=" ✓ updated" || output+=" • up-to-date"
+    [[ "${stashed#*:}" == "true" ]] && output+=", stashed"
+    
+    # Process branch results
+    local success_list="${success#*:}"
+    local failed_list="${failed#*:}"
+    local skipped_list="${skipped#*:}"
+    
+    if [[ -n "${success_list}" ]]; then
+        success_list="${success_list//,/ }"
+        printf ", %b✓%b rebased: %s" "$GREEN" "$NC" "$success_list"
+    fi
+    
+    if [[ -n "${failed_list}" ]]; then
+        failed_list="${failed_list//,/ }"
+        printf ", %b✗%b failed: %s" "$RED" "$NC" "$failed_list"
+    fi
+    
+    if [[ -n "${skipped_list}" ]]; then
+        skipped_list="${skipped_list//,/ }"
+        printf ", %b•%b skipped: %s" "$YELLOW" "$NC" "$skipped_list"
+    fi
+    
+    echo "$output"
+}
+
+#===============================================================
+# COMMAND LINE INTERFACE
+#===============================================================
+show_version() {
+    echo "$SCRIPT_NAME version $VERSION"
+    echo "Enhanced repository updater with bash 3+ compatibility"
+}
+
+show_help() {
+    cat << 'EOF'
+update-core-repos.sh - Git Repository Update Tool
+
+USAGE:
+    update-core-repos.sh [OPTIONS] [CONFIG_FILE]
+
+OPTIONS:
+    -a, --ask           Ask before switching back to original branch
+    -r, --rebase FILE   Specify custom rebase file
+    -n, --no-push       Don't force push rebased branches to origin
+    -f, --force         Force rebase even if master wasn't updated
+    -v, --verbose       Enable verbose output with debug information
+    -g, --generate      Generate example configuration files and exit
+    -h, --help          Show this help message
+    --version           Show version information
+
+CONFIGURATION:
+    Config file format: One repository path per line
+    Rebase file format: One branch name per line, or 'repo:branch'
+
+EXAMPLES:
+    update-core-repos.sh                    # Use default configuration
+    update-core-repos.sh -v                # Run with verbose output
+    update-core-repos.sh --generate         # Create example configuration files
+    update-core-repos.sh custom-repos.txt  # Use custom repository list
+
+EOF
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -a|--ask) ASK_BEFORE_SWITCH="true" ;;
+            -r|--rebase) 
+                [[ -z "${2:-}" ]] && { log_error "Option $1 requires an argument"; exit 1; }
+                REBASE_FILE_ARG="$2"; shift ;;
+            -n|--no-push) FORCE_PUSH="false" ;;
+            -f|--force) FORCE_REBASE="true" ;;
+            -v|--verbose) VERBOSE="true" ;;
+            -g|--generate)
+                local config_file="$CONFIG_DIR/$CONFIG_FILE_NAME"
+                local rebase_file="$CONFIG_DIR/$REBASE_FILE_NAME"
+                mkdir -p "$CONFIG_DIR"
+                
+                # Create example config file
+                cat > "$config_file" << 'EOF'
+# Repository Update Configuration
+# One repository path per line (relative to $HOME/code or absolute paths)
+# Lines starting with # are comments
 
 # Example repositories
-example-repo-1
-example-repo-2
-example-repo-3
-example-repo-4
+my-project-1
+my-project-2
+dev-tools
 
-# Example of absolute path (commented out)
-# /Users/dlighty/code/personal-dev-tools
+# Example absolute path
+# /path/to/specific/repository
 EOF
-  fi
-  
-  # Create example rebase file if it doesn't exist
-  if [ ! -f "$rebase_path" ]; then
-    echo -e "${YELLOW}Creating example rebase file at $rebase_path${NC}"
-    mkdir -p "$(dirname "$rebase_path")"
-    cat > "$rebase_path" << EOF
-# Branches to rebase onto $BASE_BRANCH
-# Format: one branch name per line, or 'repo:branch' to target specific repositories
+                
+                # Create example rebase file
+                cat > "$rebase_file" << 'EOF'
+# Branches to Rebase Configuration
+# Format: branch-name OR repo:branch-name
 # Examples:
-# feature-branch              # Rebase 'feature-branch' in all repositories where it exists
-# example-repo:feature-123    # Rebase only in specific repository
+# feature-branch                    # Rebase in all repos where it exists
+# my-repo:specific-feature         # Rebase only in specific repository
+
+# Example branches
+feature-branch
+hotfix-123
+development
 EOF
-  fi
-}
-
-# Parse command line options
-usage() {
-  echo "Usage: $0 [OPTIONS] [CONFIG_FILE]"
-  echo "Options:"
-  echo "  -a, --ask       Ask before switching back to original branch"
-  echo "  -r, --rebase    Specify a custom rebase file"
-  echo "  -g, --generate  Generate example config files and exit"
-  echo "  -n, --no-push   Don't force push rebased branches to origin"
-  echo "  -c, --no-clean  Don't prompt for cleaning untracked branches"
-  echo "  -f, --force     Force rebase even if master didn't change"
-  echo "  -h, --help      Display this help message"
-  echo ""
-  echo "If CONFIG_FILE is not specified, defaults to $CONFIG_DIR/$CONFIG_FILE_NAME"
-  echo "The config file should contain repository paths to update, one per line."
-  echo "Lines starting with '#' are treated as comments."
-  echo "The rebase file contains branch names to rebase, one per line."
-  echo "Each line can be either a simple branch name or in 'repo:branch' format."
-  echo ""
-  echo "By default, successfully rebased branches will be force-pushed to origin."
-  echo "Use -n/--no-push to disable this behavior."
-  exit 1
-}
-
-# Parse command line arguments
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -a|--ask)
-      ASK_BEFORE_SWITCH="true"
-      shift 1
-      ;;
-    -r|--rebase)
-      REBASE_FILE_ARG="$2"
-      shift 2
-      ;;
-    -n|--no-push)
-      FORCE_PUSH="false"
-      shift 1
-      ;;
-    -c|--no-clean)
-      CLEAN_BRANCHES="false"
-      shift 1
-      ;;
-    -f|--force)
-      FORCE_REBASE="true"
-      shift 1
-      ;;
-    -g|--generate)
-      # Generate example config files and exit
-      CONFIG_FILE_PATH="$CONFIG_DIR/$CONFIG_FILE_NAME"
-      REBASE_FILE_PATH="$CONFIG_DIR/$REBASE_FILE_NAME"
-      create_example_files "$CONFIG_FILE_PATH" "$REBASE_FILE_PATH"
-      echo -e "${GREEN}Example config files created. Edit them as needed and run the script again.${NC}"
-      exit 0
-      ;;
-    -h|--help)
-      usage
-      ;;
-    -*)
-      echo "Unknown option: $1"
-      usage
-      ;;
-    *)
-      # First non-option argument is the config file
-      if [ -z "$CONFIG_FILE_ARG" ]; then
-        CONFIG_FILE_ARG="$1"
-      else
-        echo "Unexpected argument: $1"
-        usage
-      fi
-      shift
-      ;;
-  esac
-done
-
-# File containing repositories to update
-CONFIG_FILE="${CONFIG_FILE_ARG:-$CONFIG_DIR/$CONFIG_FILE_NAME}"
-REBASE_FILE="${REBASE_FILE_ARG:-$CONFIG_DIR/$REBASE_FILE_NAME}"
-
-# Create example files if they don't exist
-create_example_files "$CONFIG_FILE" "$REBASE_FILE"
-
-# Load repositories from config file
-REPOS=()
-if [ -f "$CONFIG_FILE" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
-    # Skip empty lines and comments
-    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    
-    # Strip leading/trailing whitespace
-    line=$(echo "$line" | xargs)
-    
-    # If line starts with '/', it's an absolute path
-    # Otherwise, prepend the projects directory
-    if [[ "$line" == /* ]]; then
-      REPOS+=("$line")
-    else
-      REPOS+=("$PROJECTS_DIR/$line")
-    fi
-  done < "$CONFIG_FILE"
-else
-  echo -e "${RED}Error: Config file $CONFIG_FILE does not exist!${NC}"
-  echo "Please create a config file with repository paths, one per line."
-  echo "Example:"
-  echo "example-repo-1"
-  echo "example-repo-2"
-  exit 1
-fi
-
-# Function to update a repository
-update_repo() {
-  local repo_path=$1
-  local repo_name=$(basename "$repo_path")
-  
-  echo -e "\n${YELLOW}Processing $repo_name...${NC}"
-  
-  # Initialize arrays to track branch results
-  local success_branches=()
-  local failed_branches=()
-  local skipped_branches=()
-  
-  # Find the repo index in the global arrays
-  repo_index=-1
-  for i in "${!REPO_NAMES[@]}"; do
-    if [[ "${REPO_NAMES[$i]}" == "$repo_name" ]]; then
-      repo_index=$i
-      break
-    fi
-  done
-  
-  # Check if directory exists
-  if [ ! -d "$repo_path" ]; then
-    echo -e "${RED}Repository directory $repo_path does not exist!${NC}"
-    if [ $repo_index -ge 0 ]; then
-      REPO_RESULTS[$repo_index]="${RED}Directory not found${NC}"
-    fi
-    return 1
-  fi
-  
-  # Navigate to repository
-  cd "$repo_path" || return 1
-  
-  # Check if it's a git repository
-  if [ ! -d ".git" ]; then
-    echo -e "${RED}$repo_path is not a git repository!${NC}"
-    if [ $repo_index -ge 0 ]; then
-      REPO_RESULTS[$repo_index]="${RED}Not a git repository${NC}"
-    fi
-    return 1
-  fi
-  
-  # Fetch and pull master
-  echo "Fetching latest changes..."
-  git fetch origin
-  
-  # Save current branch to switch back to later
-  current_branch=$(git rev-parse --abbrev-ref HEAD)
-  
-  # Check if there are any pending changes
-  has_changes=false
-  if [[ -n "$(git status --porcelain)" ]]; then
-    has_changes=true
-    echo -e "${YELLOW}[$repo_name] Detected uncommitted changes in $current_branch.${NC}"
-  fi
-  
-  # Stash changes if needed and switch to base branch
-  stash_created=false
-  if [ "$current_branch" != "$BASE_BRANCH" ]; then
-    if [ "$has_changes" = true ]; then
-      echo -e "${YELLOW}[$repo_name] Auto-stashing changes before switching branches...${NC}"
-      stash_message="auto-stash-before-update-$(date +%Y%m%d-%H%M%S)"
-      git stash push -m "$stash_message"
-      stash_created=true
-    fi
-    
-    echo "Switching to $BASE_BRANCH branch..."
-    git checkout "$BASE_BRANCH"
-  elif [ "$has_changes" = true ]; then
-    echo -e "${YELLOW}[$repo_name] Auto-stashing changes before pulling...${NC}"
-    stash_message="auto-stash-before-update-$(date +%Y%m%d-%H%M%S)"
-    git stash push -m "$stash_message"
-    stash_created=true
-  fi
-  
-  echo "Pulling latest changes for $BASE_BRANCH..."
-  pull_result=$(git pull origin "$BASE_BRANCH" 2>&1)
-  
-  # Check if master was actually updated
-  master_updated=false
-  if [[ "$pull_result" != *"Already up to date"* ]]; then
-    master_updated=true
-    echo -e "${GREEN}[$repo_name] $BASE_BRANCH was updated${NC}"
-  else
-    echo -e "${YELLOW}[$repo_name] $BASE_BRANCH already up to date${NC}"
-  fi
-  
-  # Get branches to rebase from the rebase file
-  branches_to_rebase=()
-  local_branches_without_remote=()
-  
-  if [ -f "$REBASE_FILE" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      # Skip empty lines
-      [ -z "$line" ] && continue
-      
-      # Check if line matches either repo:branch format or just branch format
-      if [[ "$line" == "$repo_name:"* ]]; then
-        # Extract branch name after repo prefix
-        branch=${line#*:}
-        # NEVER rebase master/main branches
-        if [ "$branch" = "master" ] || [ "$branch" = "main" ]; then
-          echo -e "${YELLOW}[$repo_name] Ignoring $branch in rebase list - protected branch.${NC}"
-          continue
-        fi
-        branches_to_rebase+=("$branch")
-      elif ! [[ "$line" == *":"* ]]; then
-        # Line doesn't contain colon, treat as branch name
-        # NEVER rebase master/main branches
-        if [ "$line" = "master" ] || [ "$line" = "main" ]; then
-          echo -e "${YELLOW}[$repo_name] Ignoring $line in rebase list - protected branch.${NC}"
-          continue
-        fi
-        branches_to_rebase+=("$line")
-      fi
-    done < "$REBASE_FILE"
-  fi
-  
-  # Find local branches without remote tracking branch if clean mode is enabled
-  if [ "$CLEAN_BRANCHES" = "true" ]; then
-    echo "Looking for local branches without remote tracking branch..."
-    # Get all local branches
-    all_local_branches=$(git branch | grep -v "^*" | sed 's/^[[:space:]]*//')
-    
-    # Check each local branch
-    for branch in $all_local_branches; do
-      # Skip BASE_BRANCH
-      if [ "$branch" = "$BASE_BRANCH" ] || [ "$branch" = "master" ] || [ "$branch" = "main" ]; then
-        continue
-      fi
-      
-      # Check if branch has a remote tracking branch
-      remote_branch=$(git for-each-ref --format='%(upstream:short)' refs/heads/$branch)
-      if [ -z "$remote_branch" ]; then
-        # Check if branch exists on origin
-        if ! git ls-remote --heads origin $branch | grep -q $branch; then
-          local_branches_without_remote+=("$branch")
-        fi
-      fi
+                
+                log_info "Generated example configuration files:"
+                log_info "  Config: $config_file"
+                log_info "  Rebase: $rebase_file"
+                log_info "Edit these files and run the script again"
+                exit 0 ;;
+            -h|--help) show_help; exit 0 ;;
+            --version) show_version; exit 0 ;;
+            -*) log_error "Unknown option: $1"; show_help; exit 1 ;;
+            *)
+                [[ -n "${CONFIG_FILE_ARG:-}" ]] && { log_error "Multiple config files specified"; exit 1; }
+                CONFIG_FILE_ARG="$1" ;;
+        esac
+        shift
     done
-    
-    # Inform about branches without remote
-    if [ ${#local_branches_without_remote[@]} -gt 0 ]; then
-      echo -e "${YELLOW}[$repo_name] Found ${#local_branches_without_remote[@]} local branches without remote tracking branch:${NC}"
-      for branch in "${local_branches_without_remote[@]}"; do
-        echo -e "  - $branch"
-      done
-    fi
-  fi
-
-  # Process each branch that needs rebasing
-  has_conflict=false
-  for branch in "${branches_to_rebase[@]}"; do
-    # Extra safety check to never rebase master/main branches
-    if [ "$branch" = "$BASE_BRANCH" ] || [ "$branch" = "master" ] || [ "$branch" = "main" ]; then
-      echo -e "${YELLOW}[$repo_name] Skipping $branch as it's a protected branch.${NC}"
-      skipped_branches+=("$branch (protected branch)")
-      continue
-    fi
-    
-    # Skip rebase if master wasn't updated (unless forced)
-    if [ "$master_updated" = false ] && [ "$FORCE_REBASE" = false ]; then
-      echo -e "${YELLOW}[$repo_name] Skipping rebase of '$branch' as $BASE_BRANCH wasn't updated.${NC}"
-      skipped_branches+=("$branch (master not updated)")
-      continue
-    fi
-    
-    echo "Rebasing branch '$branch' on $BASE_BRANCH in $repo_name..."
-    
-    # Check if branch exists locally
-    if ! git show-ref --verify --quiet refs/heads/"$branch"; then
-      echo -e "${YELLOW}[$repo_name] Branch '$branch' doesn't exist locally, skipping.${NC}"
-      skipped_branches+=("$branch (not found locally)")
-      continue
-    fi
-    
-    # Switch to the branch
-    git checkout "$branch"
-    
-    # Rebase on master
-    rebase_result=$(git rebase "$BASE_BRANCH" 2>&1)
-    if echo "$rebase_result" | grep -q "CONFLICT"; then
-      echo -e "${RED}[$repo_name] Merge conflicts during rebase of '$branch'! Manual intervention required.${NC}"
-      git rebase --abort
-      has_conflict=true
-      failed_branches+=("$branch")
-    else
-      echo -e "${GREEN}[$repo_name] Successfully rebased '$branch' on $BASE_BRANCH.${NC}"
-      
-      # Force push if enabled
-      if [ "$FORCE_PUSH" = "true" ]; then
-        echo -e "${YELLOW}[$repo_name] Force pushing $branch to origin...${NC}"
-        push_result=$(git push origin "$branch" --force 2>&1)
-        
-        if [ $? -eq 0 ]; then
-          echo -e "${GREEN}[$repo_name] Successfully pushed $branch to origin.${NC}"
-          success_branches+=("$branch (rebased & pushed)")
-        else
-          echo -e "${RED}[$repo_name] Failed to push $branch to origin: ${NC}"
-          echo "$push_result"
-          # Still count as success for rebase, but note push failure
-          success_branches+=("$branch (rebased but push failed)")
-        fi
-      else
-        success_branches+=("$branch")
-      fi
-    fi
-  done
-  
-  # Switch back to the original branch
-  switch_back=true
-  if [ "$has_conflict" = false ] && [ "$current_branch" != "$BASE_BRANCH" ]; then
-    if [ "$ASK_BEFORE_SWITCH" = "true" ]; then
-      read -p "Switch back to '$current_branch' branch? (y/n): " answer
-      case ${answer:0:1} in
-        n|N )
-          switch_back=false
-          if [ "$stash_created" = true ]; then
-            echo -e "${YELLOW}[$repo_name] Warning: Changes were stashed but you chose to stay on $BASE_BRANCH.${NC}"
-            echo -e "${YELLOW}[$repo_name] Use 'git stash list' and 'git stash apply' to recover your changes.${NC}"
-          fi
-          echo -e "${YELLOW}Staying on current branch.${NC}"
-          ;;
-        * )
-          echo "Switching back to '$current_branch' branch."
-          ;;
-      esac
-    fi
-    
-    if [ "$switch_back" = true ]; then
-      git checkout "$current_branch"
-      
-      # Pop stash if we created one
-      if [ "$stash_created" = true ]; then
-        echo -e "${YELLOW}[$repo_name] Reapplying stashed changes...${NC}"
-        stash_result=$(git stash pop 2>&1)
-        
-        if echo "$stash_result" | grep -q "CONFLICT"; then
-          echo -e "${RED}[$repo_name] Conflicts occurred when reapplying stashed changes.${NC}"
-          echo -e "${RED}[$repo_name] Please resolve conflicts manually.${NC}"
-        else
-          echo -e "${GREEN}[$repo_name] Successfully reapplied stashed changes.${NC}"
-        fi
-      fi
-    fi
-  elif [ "$stash_created" = true ] && [ "$current_branch" = "$BASE_BRANCH" ]; then
-    # We're on master and stashed changes, need to apply stash
-    echo -e "${YELLOW}[$repo_name] Reapplying stashed changes to $BASE_BRANCH...${NC}"
-    stash_result=$(git stash pop 2>&1)
-    
-    if echo "$stash_result" | grep -q "CONFLICT"; then
-      echo -e "${RED}[$repo_name] Conflicts occurred when reapplying stashed changes.${NC}"
-      echo -e "${RED}[$repo_name] Please resolve conflicts manually.${NC}"
-    else
-      echo -e "${GREEN}[$repo_name] Successfully reapplied stashed changes.${NC}"
-    fi
-  fi
-  
-  # Ask about deleting local branches without remote
-  if [ "$CLEAN_BRANCHES" = "true" ] && [ ${#local_branches_without_remote[@]} -gt 0 ]; then
-    echo -e "\n${YELLOW}[$repo_name] Do you want to delete local branches without remote tracking branch?${NC}"
-    echo -e "${YELLOW}These branches are only available locally and not pushed to origin:${NC}"
-    
-    for branch in "${local_branches_without_remote[@]}"; do
-      # Make sure we're on BASE_BRANCH before trying to delete
-      if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BASE_BRANCH" ]; then
-        git checkout "$BASE_BRANCH"
-      fi
-      
-      read -p "Delete branch '$branch'? (y/n): " answer
-      case ${answer:0:1} in
-        y|Y )
-          git branch -D "$branch"
-          echo -e "${GREEN}[$repo_name] Deleted branch '$branch'.${NC}"
-          ;;
-        * )
-          echo -e "${YELLOW}[$repo_name] Keeping branch '$branch'.${NC}"
-          ;;
-      esac
-    done
-  fi
-
-  # Return to original directory
-  cd - > /dev/null
-
-  # Store results in global array
-  if [ $repo_index -ge 0 ]; then
-    # Construct detailed result message
-    local result_message=""
-    
-    # Add master pull info
-    result_message+="${GREEN}Pulled $BASE_BRANCH${NC}\n"
-    
-    # Add stash info
-    if [ "$stash_created" = true ]; then
-      if echo "$stash_result" | grep -q "CONFLICT"; then
-        result_message+="${RED}Stash conflicts: Changes were auto-stashed but had conflicts when reapplied${NC}\n"
-      else
-        result_message+="${GREEN}Auto-stashed: Changes were temporarily stashed and reapplied${NC}\n"
-      fi
-    fi
-    
-    # Add branch rebase info
-    if [ ${#success_branches[@]} -eq 0 ] && [ ${#failed_branches[@]} -eq 0 ] && [ ${#skipped_branches[@]} -eq 0 ]; then
-      result_message+="${YELLOW}No branches found to rebase${NC}\n"
-    else
-      # Add successful branches
-      if [ ${#success_branches[@]} -gt 0 ]; then
-        result_message+="${GREEN}Rebased: ${success_branches[*]}${NC}\n"
-      fi
-      
-      # Add failed branches
-      if [ ${#failed_branches[@]} -gt 0 ]; then
-        result_message+="${RED}Failed: ${failed_branches[*]}${NC}\n"
-      fi
-      
-      # Add skipped branches
-      if [ ${#skipped_branches[@]} -gt 0 ]; then
-        result_message+="${YELLOW}Skipped: ${skipped_branches[*]}${NC}\n"
-      fi
-    fi
-    
-    # Remove trailing newline
-    result_message=$(echo -e "$result_message" | sed '$ s/\\n$//')
-    
-    REPO_RESULTS[$repo_index]="$result_message"
-  fi
-  
-  return $([ "$has_conflict" = true ] && echo 1 || echo 0)
 }
 
-# Check if rebase file exists
-if [ ! -f "$REBASE_FILE" ]; then
-  echo -e "${YELLOW}Warning: Rebase file $REBASE_FILE does not exist. Will only pull $BASE_BRANCH for all repos.${NC}"
-  echo -e "${YELLOW}To specify branches to rebase, create a file at $REBASE_FILE${NC}"
-  echo -e "${YELLOW}Format: one branch per line, or 'repo:branch' to target specific repositories.${NC}"
+#===============================================================
+# MAIN EXECUTION
+#===============================================================
+main() {
+    setup_environment
+    parse_arguments "$@"
+    
+    # Set file paths
+    readonly CONFIG_FILE="${CONFIG_FILE_ARG:-$CONFIG_DIR/$CONFIG_FILE_NAME}"
+    readonly REBASE_FILE="${REBASE_FILE_ARG:-$CONFIG_DIR/$REBASE_FILE_NAME}"
+    
+    log_debug "Using config file: $CONFIG_FILE"
+    log_debug "Using rebase file: $REBASE_FILE"
+    
+    # Load repositories
+    if ! load_repositories "$CONFIG_FILE"; then
+        log_error "Failed to load repositories from configuration"
+        exit 1
+    fi
+    
+    # Execute repository updates with timing
+    local start_time end_time duration
+    start_time="$(date +%s)"
+    
+    execute_repositories
+    
+    end_time="$(date +%s)"
+    duration="$((end_time - start_time))"
+    
+    # Generate summary
+    local success_count="${#SUCCESS_REPOS[@]}"
+    local failed_count="${#FAILED_REPOS[@]}"
+    local total_count="$((success_count + failed_count))"
+    
+    printf "\n%bUPDATE SUMMARY%b\n" "$BOLD" "$NC"
+    printf "Completed in %ds • " "$duration"
+    
+    if [[ $success_count -gt 0 ]]; then
+        printf "%b%d success%b" "$GREEN" "$success_count" "$NC"
+    else
+        printf "%d success" "$success_count"
+    fi
+    
+    printf " • "
+    
+    if [[ $failed_count -gt 0 ]]; then
+        printf "%b%d failed%b" "$RED" "$failed_count" "$NC"
+    else
+        printf "%d failed" "$failed_count"
+    fi
+    
+    printf " • %d total\n" "$total_count"
+    
+    # Show failed repositories immediately if any
+    if [[ $failed_count -gt 0 ]]; then
+        printf "\n%bFailed repositories:%b\n" "$RED" "$NC"
+        printf '  • %s\n' "${FAILED_REPOS[@]}"
+    fi
+    
+    # Detailed results for verbose mode or failures
+    if [[ "$VERBOSE" == "true" || $failed_count -gt 0 ]]; then
+        printf "\n%bDetailed Results:%b\n" "$BOLD" "$NC"
+        for i in "${!REPO_NAMES[@]}"; do
+            local repo_name="${REPO_NAMES[$i]}"
+            printf "  %b%s%b: " "$BOLD" "$repo_name" "$NC"
+            format_result "${REPO_RESULTS[$i]}"
+        done
+    fi
+    
+    # Exit with appropriate code
+    [[ $failed_count -eq 0 ]]
+}
+
+# Execute main function if script is run directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
 fi
-
-# Validate repositories list
-if [ ${#REPOS[@]} -eq 0 ]; then
-  echo -e "${RED}Error: No repositories specified in $CONFIG_FILE.${NC}"
-  echo "Please add at least one repository path to the config file."
-  exit 1
-fi
-
-# Display configuration
-echo -e "${YELLOW}======= Configuration =======${NC}"
-echo -e "Base branch: ${GREEN}$BASE_BRANCH${NC}"
-echo -e "Auto-stashing changes: ${GREEN}Enabled${NC}"
-echo -e "Force push after rebase: $([ "$FORCE_PUSH" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
-echo -e "Force rebase regardless of updates: $([ "$FORCE_REBASE" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
-echo -e "Ask before branch switch: $([ "$ASK_BEFORE_SWITCH" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
-echo -e "Check for untracked branches: $([ "$CLEAN_BRANCHES" = "true" ] && echo "${GREEN}Enabled${NC}" || echo "${YELLOW}Disabled${NC}")"
-echo -e "Config file: ${GREEN}$CONFIG_FILE${NC}"
-echo -e "Rebase file: ${GREEN}$REBASE_FILE${NC}"
-echo -e "Found ${GREEN}${#REPOS[@]}${NC} repositories to update."
-echo -e "${YELLOW}============================${NC}"
-
-# Repository and branch results
-# Use simple arrays instead of associative arrays for broader compatibility
-REPO_NAMES=()
-REPO_RESULTS=()
-CONFLICT_REPOS=()
-SUCCESS_REPOS=()
-
-# Update each repository
-for repo in "${REPOS[@]}"; do
-  # Store repository name for result tracking
-  repo_name=$(basename "$repo")
-  REPO_NAMES+=("$repo_name")
-  REPO_RESULTS+=("")  # Initialize with empty string, will be set in update_repo function
-  
-  if update_repo "$repo"; then
-    SUCCESS_REPOS+=("$repo_name")
-  else
-    CONFLICT_REPOS+=("$repo_name")
-  fi
-done
-
-# Print summary
-echo -e "\n${YELLOW}=============== UPDATE SUMMARY ===============${NC}"
-
-# First show overall status
-if [ ${#SUCCESS_REPOS[@]} -gt 0 ]; then
-  echo -e "${GREEN}Successfully updated repositories:${NC}"
-  for repo in "${SUCCESS_REPOS[@]}"; do
-    echo -e "  - $repo"
-  done
-fi
-
-if [ ${#CONFLICT_REPOS[@]} -gt 0 ]; then
-  echo -e "\n${RED}Repositories with issues:${NC}"
-  for repo in "${CONFLICT_REPOS[@]}"; do
-    echo -e "  - $repo"
-  done
-fi
-
-# Then show detailed branch status for each repo
-echo -e "\n${YELLOW}Detailed Results:${NC}"
-for i in "${!REPO_NAMES[@]}"; do
-  repo_name="${REPO_NAMES[$i]}"
-  echo -e "\n${YELLOW}$repo_name:${NC}"
-  # Display the stored results with proper indentation
-  echo -e "${REPO_RESULTS[$i]}" | sed 's/^/  /'
-done
-
-echo -e "\n${YELLOW}==============================================${NC}"

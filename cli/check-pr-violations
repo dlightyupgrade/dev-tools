@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Check PR Violations - Extract Tekton/Checkstyle violations from GitHub PR comments
+# Usage: check-pr-violations <pr-number> [repository]
+
+set -e
+
+# Default repository if not provided
+REPO="${2:-$(basename $(git remote get-url origin) .git)}"
+OWNER="Credify"
+PR_NUMBER="$1"
+
+if [ -z "$PR_NUMBER" ]; then
+    echo "Usage: check-pr-violations <pr-number> [repository]"
+    echo "Example: check-pr-violations 2182"
+    echo "Example: check-pr-violations 2182 creditline-hardship-servicing-srvc"
+    exit 1
+fi
+
+echo "🔍 Checking PR #$PR_NUMBER in $OWNER/$REPO for violations..."
+echo ""
+
+# Get inline comments that contain violation reports
+VIOLATIONS=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r '
+    .[] | 
+    select(.body | contains("**Reporter**")) | 
+    {
+        file: .path,
+        line: (.original_line // .line),
+        body: .body
+    } |
+    "📁 File: \(.file)\n📍 Line: \(.line)\n⚠️  Severity: \(.body | match("\\*\\*Severity\\*\\*: ([A-Z]+)"; "g").captures[0].string)\n🔧 Rule: \(.body | match("\\*\\*Rule\\*\\*: ([^\n]+)"; "g").captures[0].string)\n💬 Message: \(.body | split("\n") | .[5] // "Unable to extract message")\n" + ("─" * 80)
+')
+
+if [ -z "$VIOLATIONS" ]; then
+    echo "✅ No violations found in PR #$PR_NUMBER"
+else
+    echo "$VIOLATIONS"
+    echo ""
+    echo "📊 Summary:"
+    echo "   Found $(echo "$VIOLATIONS" | grep -c "📁 File:") violation(s)"
+fi
