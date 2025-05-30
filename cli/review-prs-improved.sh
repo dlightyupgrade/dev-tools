@@ -1,0 +1,611 @@
+#!/bin/bash
+# PR Review Script - Improved Version
+# Creates a markdown report of open PRs categorized by status
+#
+# Usage: review-prs.sh [template_file]
+#
+# DAILY NOTE REQUIREMENTS:
+# The daily note must have:
+# 1. A main header: "# Daily Notes" (preserves everything from line 1 to this header)
+# 2. A separator: "--- 📋 PR Review End ---" (preserves everything after this separator)
+#
+# The script will overwrite content between these two markers with fresh PR data.
+# Everything above the header and below the separator is preserved.
+#
+# TEMPLATE FILE (optional):
+# The template_file should contain a "--- 📋 PR Review End ---" separator
+# to indicate where the script should stop extracting template content.
+# Everything from the separator onward will be included after the PR review section.
+
+# Strict error handling
+set -euo pipefail
+
+# Constants
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROJECT_DIR="$HOME/code"
+readonly PR_SEPARATOR="--- 📋 PR Review End ---"
+readonly DAILY_NOTES_HEADER="# Daily Notes"
+
+# Colors for output
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly NC='\033[0m' # No Color
+
+# Global variables
+VERBOSE=false
+DRY_RUN=false
+
+# Logging functions
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $*" >&2
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $*" >&2
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $*" >&2
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $*" >&2
+}
+
+log_debug() {
+    if [[ "$VERBOSE" == true ]]; then
+        echo -e "[DEBUG] $*" >&2
+    fi
+}
+
+# Error handling
+cleanup() {
+    local exit_code=$?
+    if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
+        rm -rf "$TEMP_DIR"
+    fi
+    exit $exit_code
+}
+
+trap cleanup EXIT INT TERM
+
+die() {
+    log_error "$1"
+    exit "${2:-1}"
+}
+
+# Validation functions
+check_prerequisites() {
+    log_debug "Checking prerequisites..."
+    
+    # Check for required tools
+    command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is not installed. Install with: brew install gh"
+    command -v jq >/dev/null 2>&1 || die "jq is not installed. Install with: brew install jq"
+    
+    # Check GitHub CLI authentication
+    if ! gh auth status >/dev/null 2>&1; then
+        die "GitHub CLI is not authenticated. Run: gh auth login"
+    fi
+    
+    log_debug "Prerequisites check passed"
+}
+
+validate_config_file() {
+    local config_file="$1"
+    
+    if [[ ! -f "$config_file" ]]; then
+        return 1
+    fi
+    
+    if [[ ! -r "$config_file" ]]; then
+        die "Config file $config_file is not readable"
+    fi
+    
+    # Check if file has any non-comment, non-empty lines
+    if ! grep -v '^[[:space:]]*#' "$config_file" | grep -q '[^[:space:]]'; then
+        die "Config file $config_file contains no valid repository entries"
+    fi
+    
+    return 0
+}
+
+validate_daily_note() {
+    local daily_note="$1"
+    
+    if [[ ! -f "$daily_note" ]]; then
+        return 1
+    fi
+    
+    if ! grep -q "^$DAILY_NOTES_HEADER" "$daily_note"; then
+        die "Daily note $daily_note is missing required header '$DAILY_NOTES_HEADER'"
+    fi
+    
+    if ! grep -q "^$PR_SEPARATOR$" "$daily_note"; then
+        log_error "Daily note $daily_note is missing required separator '$PR_SEPARATOR'"
+        log_error "Please add this separator to mark where the PR script should stop updating content."
+        log_error "The separator should be placed before any sections you want to preserve (like session tracking)."
+        return 1
+    fi
+    
+    return 0
+}
+
+# Configuration functions
+find_config_file() {
+    local configs=(
+        "$HOME/.config/dev-tools/project-list.txt"
+        "$PROJECT_DIR/project-list.txt"
+        "$SCRIPT_DIR/project-list.txt"
+    )
+    
+    for config in "${configs[@]}"; do
+        if validate_config_file "$config"; then
+            echo "$config"
+            return 0
+        fi
+    done
+    
+    log_error "No valid config file found. Looked in:"
+    printf '  - %s\n' "${configs[@]}" >&2
+    log_error "Please create a config file with repository paths, one per line."
+    return 1
+}
+
+load_repositories() {
+    local config_file="$1"
+    local repo_paths_var="$2"
+    local repo_names_var="$3"
+    
+    log_debug "Loading repositories from $config_file"
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Strip leading/trailing whitespace
+        line=$(echo "$line" | xargs)
+        [[ -z "$line" ]] && continue
+        
+        # Handle absolute vs relative paths
+        if [[ "$line" == /* ]]; then
+            eval "${repo_paths_var}+=(\"$line\")"
+            eval "${repo_names_var}+=(\"$(basename "$line")\")"
+        else
+            eval "${repo_paths_var}+=(\"$PROJECT_DIR/$line\")"
+            eval "${repo_names_var}+=(\"$line\")"
+        fi
+    done < "$config_file"
+    
+    # Get array length using indirect expansion
+    local count_cmd="${repo_paths_var}[@]"
+    local temp_array=("${!count_cmd}")
+    local array_length=${#temp_array[@]}
+    
+    if [[ $array_length -eq 0 ]]; then
+        die "No repositories found in $config_file"
+    fi
+    
+    log_debug "Loaded $array_length repositories"
+}
+
+# PR processing functions
+get_repo_info() {
+    local repo_path="$1"
+    
+    if ! cd "$repo_path" 2>/dev/null; then
+        log_warn "Could not access repository at $repo_path"
+        return 1
+    fi
+    
+    if [[ ! -d ".git" ]]; then
+        log_warn "Directory $repo_path is not a git repository"
+        return 1
+    fi
+    
+    # Get repo owner and name from git config
+    local repo_url
+    repo_url=$(git config --get remote.origin.url 2>/dev/null) || {
+        log_warn "Could not get remote origin URL for $repo_path"
+        return 1
+    }
+    
+    local owner repo
+    owner=$(echo "$repo_url" | sed -E 's/.*github.com[:\/]([^\/]+)\/([^\/]+)(\.git)?$/\1/')
+    repo=$(echo "$repo_url" | sed -E 's/.*github.com[:\/]([^\/]+)\/([^\/]+)(\.git)?$/\2/')
+    
+    # Remove .git suffix if present
+    repo=${repo%.git}
+    
+    echo "$owner/$repo"
+}
+
+process_single_pr() {
+    local pr_data="$1"
+    local repo_info="$2"
+    
+    # Parse PR data (assuming JSON format from gh pr list --json)
+    local pr_num title branch is_draft mergeable review_decision
+    pr_num=$(echo "$pr_data" | jq -r '.number')
+    title=$(echo "$pr_data" | jq -r '.title')
+    branch=$(echo "$pr_data" | jq -r '.headRefName')
+    is_draft=$(echo "$pr_data" | jq -r '.isDraft')
+    mergeable=$(echo "$pr_data" | jq -r '.mergeable')
+    review_decision=$(echo "$pr_data" | jq -r '.reviewDecision // "NONE"')
+    
+    log_debug "Processing PR #$pr_num: $title"
+    
+    # Check for failing CI checks
+    local failing_checks=0
+    local check_status
+    check_status=$(gh pr view "$pr_num" --json statusCheckRollup 2>/dev/null || echo '{"statusCheckRollup":[]}')
+    
+    if [[ -n "$check_status" ]]; then
+        local failure_count
+        failure_count=$(echo "$check_status" | jq '[.statusCheckRollup[] | select(.conclusion != "SUCCESS" and .conclusion != null and .conclusion != "NEUTRAL")] | length' 2>/dev/null || echo "0")
+        failing_checks=$failure_count
+    fi
+    
+    # Check for unresolved comments
+    local comment_count=0
+    local review_comments
+    review_comments=$(gh pr view "$pr_num" --json reviewThreads 2>/dev/null || echo '{"reviewThreads":[]}')
+    
+    if [[ -n "$review_comments" ]]; then
+        comment_count=$(echo "$review_comments" | jq '[.reviewThreads[] | select(.isResolved == false)] | length' 2>/dev/null || echo "0")
+    fi
+    
+    # Build PR URL
+    local url="https://github.com/$repo_info/pull/$pr_num"
+    
+    # Determine category and build entry
+    local is_quick_fix=false
+    [[ "$branch" == *"quick-fix"* ]] && is_quick_fix=true
+    
+    # Clean title for display
+    title=$(echo "$title" | sed 's/\[//g' | sed 's/\]//g')
+    local pr_entry="- $title ($url)"
+    
+    # Build reasons string
+    local reasons=()
+    [[ "$is_draft" == "true" ]] && reasons+=("Draft PR")
+    [[ "$mergeable" == "CONFLICTING" ]] && reasons+=("Has conflicts")
+    [[ "$failing_checks" -gt 0 ]] && reasons+=("Failing checks")
+    [[ "$comment_count" -gt 0 ]] && reasons+=("Has unresolved comments")
+    [[ "$review_decision" == "CHANGES_REQUESTED" ]] && reasons+=("Changes requested")
+    
+    # Determine output file based on status and type
+    local output_file
+    if [[ ${#reasons[@]} -eq 0 ]]; then
+        # Ready for merge
+        if [[ "$is_quick_fix" == true ]]; then
+            output_file="$TEMP_DIR/quick_fix_ready.txt"
+        else
+            output_file="$TEMP_DIR/ready.txt"
+        fi
+        echo "$pr_entry" >> "$output_file"
+    else
+        # Needs attention
+        if [[ "$is_quick_fix" == true ]]; then
+            output_file="$TEMP_DIR/quick_fix_attention.txt"
+        else
+            output_file="$TEMP_DIR/attention.txt"
+        fi
+        
+        printf "%s\n\t- %s\n" "$pr_entry" "$(IFS=', '; echo "${reasons[*]}")" >> "$output_file"
+    fi
+}
+
+process_repository_prs() {
+    local repo_path="$1"
+    local repo_name="$2"
+    
+    log_info "Checking $repo_name..."
+    
+    if ! cd "$repo_path" 2>/dev/null; then
+        log_warn "Could not access $repo_path"
+        return 1
+    fi
+    
+    if [[ ! -d ".git" ]]; then
+        log_warn "$repo_path is not a git repository"
+        return 1
+    fi
+    
+    # Get repository info
+    local repo_info
+    repo_info=$(get_repo_info "$repo_path") || return 1
+    
+    # Get PRs in JSON format for easier parsing
+    local prs_json
+    prs_json=$(gh pr list --author "@me" --json number,title,headRefName,isDraft,mergeable,reviewDecision 2>/dev/null) || {
+        log_warn "Failed to fetch PRs for $repo_name"
+        return 1
+    }
+    
+    # Process each PR
+    local pr_count
+    pr_count=$(echo "$prs_json" | jq 'length')
+    
+    if [[ "$pr_count" -gt 0 ]]; then
+        log_debug "Found $pr_count PR(s) in $repo_name"
+        echo "$prs_json" | jq -c '.[]' | while read -r pr_data; do
+            process_single_pr "$pr_data" "$repo_info"
+        done
+    else
+        log_debug "No PRs found in $repo_name"
+    fi
+    
+    return 0
+}
+
+# Report generation functions
+generate_pr_report() {
+    local total_prs="$1"
+    local output_file="$2"
+    
+    cat > "$output_file" << EOF
+### PR Reviews
+
+> Last updated: $(date '+%Y-%m-%d %H:%M:%S')  |  Total PRs: $total_prs
+
+**Quick-Fix PRs Ready for Merge:**
+*Fast-track PRs with "quick-fix" in branch name - All checks passing, ready to merge*
+EOF
+
+    # Add quick-fix ready PRs
+    local quick_fix_ready_file="$TEMP_DIR/quick_fix_ready.txt"
+    if [[ -f "$quick_fix_ready_file" && -s "$quick_fix_ready_file" ]]; then
+        cat "$quick_fix_ready_file" >> "$output_file"
+        local count
+        count=$(grep -c "^-" "$quick_fix_ready_file")
+        echo "" >> "$output_file"
+        echo "> Total: $count quick-fix PR(s) ready for merge" >> "$output_file"
+    else
+        echo "- No quick-fix PRs ready for merge" >> "$output_file"
+    fi
+    echo "" >> "$output_file"
+
+    # Add quick-fix PRs needing attention
+    echo "**Quick-Fix PRs Needing Attention:**" >> "$output_file"
+    echo "*Quick-fix PRs with failing checks, unresolved comments, conflicts, or other issues*" >> "$output_file"
+    
+    local quick_fix_attention_file="$TEMP_DIR/quick_fix_attention.txt"
+    if [[ -f "$quick_fix_attention_file" && -s "$quick_fix_attention_file" ]]; then
+        cat "$quick_fix_attention_file" >> "$output_file"
+        local count
+        count=$(grep -c "^-" "$quick_fix_attention_file")
+        echo "" >> "$output_file"
+        echo "> Total: $count quick-fix PR(s) needing attention" >> "$output_file"
+    else
+        echo "- No quick-fix PRs needing attention" >> "$output_file"
+    fi
+    echo "" >> "$output_file"
+
+    # Add regular PRs ready for merge
+    echo "**Regular PRs Ready for Merge:**" >> "$output_file"
+    echo "*All checks passing, no unresolved comments, no changes requested, no conflicts, not a draft*" >> "$output_file"
+    
+    local ready_file="$TEMP_DIR/ready.txt"
+    if [[ -f "$ready_file" && -s "$ready_file" ]]; then
+        cat "$ready_file" >> "$output_file"
+        local count
+        count=$(grep -c "^-" "$ready_file")
+        echo "" >> "$output_file"
+        echo "> Total: $count regular PR(s) ready for merge" >> "$output_file"
+    else
+        echo "- No regular PRs ready for merge" >> "$output_file"
+    fi
+    echo "" >> "$output_file"
+
+    # Add regular PRs needing attention
+    echo "**Regular PRs Needing Attention:**" >> "$output_file"
+    echo "*Regular PRs with failing checks, unresolved comments, conflicts, or other issues*" >> "$output_file"
+    
+    local attention_file="$TEMP_DIR/attention.txt"
+    if [[ -f "$attention_file" && -s "$attention_file" ]]; then
+        cat "$attention_file" >> "$output_file"
+        local count
+        count=$(grep -c "^-" "$attention_file")
+        echo "" >> "$output_file"
+        echo "> Total: $count regular PR(s) needing attention" >> "$output_file"
+    else
+        echo "- No regular PRs needing attention" >> "$output_file"
+    fi
+    echo "" >> "$output_file"
+
+    # Add other PRs (placeholder for future use)
+    echo "**Other PRs:**" >> "$output_file"
+    echo "- No other PRs" >> "$output_file"
+    echo "" >> "$output_file"
+}
+
+count_total_prs() {
+    local repo_paths_var="$1"
+    local count_cmd="${repo_paths_var}[@]"
+    local repo_paths=("${!count_cmd}")
+    local total=0
+    
+    for repo_path in "${repo_paths[@]}"; do
+        if [[ -d "$repo_path/.git" ]]; then
+            local count
+            count=$(cd "$repo_path" && gh pr list --author "@me" | wc -l 2>/dev/null || echo "0")
+            total=$((total + count))
+        fi
+    done
+    
+    echo "$total"
+}
+
+update_daily_note() {
+    local daily_note="$1"
+    local pr_report_file="$2"
+    local template_file="${3:-}"
+    
+    log_debug "Updating daily note: $daily_note"
+    
+    # Validate daily note before proceeding
+    if ! validate_daily_note "$daily_note"; then
+        log_error "Daily note validation failed. Outputting PR summary to stdout instead:"
+        echo "================ PR REVIEW SUMMARY ================"
+        cat "$pr_report_file"
+        echo "=================================================="
+        return 1
+    fi
+    
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "DRY RUN: Would update $daily_note"
+        cat "$pr_report_file"
+        return 0
+    fi
+    
+    # Create temporary file for updated content
+    local temp_file
+    temp_file=$(mktemp)
+    
+    {
+        # Extract everything up to and including the main header
+        sed -n "1,/^$DAILY_NOTES_HEADER/p" "$daily_note"
+        
+        # Add work summary section
+        echo -e "\n## Work Summary\n"
+        echo "Today I worked on:"
+        
+        # Extract project/ticket sections
+        grep -A 5 "### Project/Ticket:" "$daily_note" 2>/dev/null || true
+        
+        # Add PR Reviews section
+        cat "$pr_report_file"
+        
+        # Add template content if provided
+        if [[ -n "$template_file" && -f "$template_file" ]]; then
+            if grep -q "^$PR_SEPARATOR$" "$template_file"; then
+                sed -n "/^$PR_SEPARATOR$/,/^$PR_SEPARATOR$/p" "$template_file" | \
+                    head -n -1 | \
+                    sed "s/{{date:YYYY-MM-DD}}/$(date '+%Y-%m-%d')/g" | \
+                    sed "s/{{date:MMMM D, YYYY}}/$(date '+%B %-d, %Y')/g" | \
+                    sed "s/{{time:HH:mm:ss}}/$(date '+%H:%M:%S')/g"
+            else
+                log_warn "Template file $template_file is missing required separator '$PR_SEPARATOR'"
+            fi
+        fi
+        
+        # Add everything after the separator from original file
+        sed -n "/^$PR_SEPARATOR$/,\$p" "$daily_note"
+        
+    } > "$temp_file"
+    
+    # Replace original file
+    mv "$temp_file" "$daily_note"
+    log_success "Updated daily note: $daily_note"
+}
+
+# Main function
+main() {
+    local template_file="${1:-}"
+    
+    # Parse command line options
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -n|--dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            -h|--help)
+                cat << EOF
+Usage: $0 [OPTIONS] [template_file]
+
+Options:
+    -v, --verbose     Enable verbose output
+    -n, --dry-run     Show what would be done without making changes
+    -h, --help        Show this help message
+
+Arguments:
+    template_file     Optional template file for additional content
+EOF
+                exit 0
+                ;;
+            -*)
+                die "Unknown option: $1"
+                ;;
+            *)
+                template_file="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    log_info "Starting PR review script..."
+    
+    # Check prerequisites
+    check_prerequisites
+    
+    # Set up working directory
+    TEMP_DIR=$(mktemp -d)
+    log_debug "Using temporary directory: $TEMP_DIR"
+    
+    # Find and validate config file
+    local config_file
+    config_file=$(find_config_file) || exit 1
+    log_info "Using config file: $config_file"
+    
+    # Load repositories
+    local -a repo_paths=()
+    local -a repo_names=()
+    load_repositories "$config_file" "repo_paths" "repo_names"
+    
+    # Set up daily note paths
+    local today year month month_name day
+    today=$(date +"%Y-%m-%d")
+    year=$(date +"%Y")
+    month=$(date +"%m")
+    month_name=$(date +"%b")
+    day=$(date +"%-d")
+    
+    local daily_note_dir="$HOME/notes/daily/$year/$month-$month_name"
+    local daily_note="$daily_note_dir/$today.md"
+    
+    # Create daily notes directory if needed
+    mkdir -p "$daily_note_dir"
+    
+    # Check if daily note exists
+    if [[ ! -f "$daily_note" ]]; then
+        log_warn "Daily note not found at $daily_note. Will only output PR summary."
+        daily_note=""
+    fi
+    
+    # Count total PRs across all repositories
+    log_info "Counting total PRs..."
+    local total_prs
+    total_prs=$(count_total_prs "repo_paths")
+    log_info "Found $total_prs total PRs"
+    
+    # Process each repository
+    for i in "${!repo_paths[@]}"; do
+        process_repository_prs "${repo_paths[$i]}" "${repo_names[$i]}" || true
+    done
+    
+    # Generate PR report
+    local pr_report_file="$TEMP_DIR/pr_review.md"
+    generate_pr_report "$total_prs" "$pr_report_file"
+    
+    # Update daily note or output to stdout
+    if [[ -n "$daily_note" && -f "$daily_note" ]]; then
+        update_daily_note "$daily_note" "$pr_report_file" "$template_file"
+    else
+        log_info "No daily note to update. Outputting PR summary:"
+        echo "================ PR REVIEW SUMMARY ================"
+        cat "$pr_report_file"
+        echo "=================================================="
+    fi
+    
+    log_success "PR review completed successfully!"
+}
+
+# Run main function with all arguments
+main "$@"

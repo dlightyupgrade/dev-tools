@@ -2,6 +2,21 @@
 # PR Review Script
 # Creates a markdown report of open PRs categorized by status
 #
+# Usage: review-prs.sh [template_file]
+#
+# DAILY NOTE REQUIREMENTS:
+# The daily note must have:
+# 1. A main header: "# Daily Notes" (preserves everything from line 1 to this header)
+# 2. A separator: "--- 📋 PR Review End ---" (preserves everything after this separator)
+#
+# The script will overwrite content between these two markers with fresh PR data.
+# Everything above the header and below the separator is preserved.
+#
+# TEMPLATE FILE (optional):
+# The template_file should contain a "--- 📋 PR Review End ---" separator
+# to indicate where the script should stop extracting template content.
+# Everything from the separator onward will be included after the PR review section.
+#
 # Uses GitHub CLI to fetch detailed PR information including:
 # - Pull request review status
 # - Status check results
@@ -18,6 +33,9 @@
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_DIR="$HOME/code"
 
+# Get template file from argument
+TEMPLATE_FILE="$1"
+
 # Date variables
 TODAY=$(date +"%Y-%m-%d")
 YEAR=$(date +"%Y")
@@ -29,7 +47,6 @@ DAY=$(date +"%d" | sed 's/^0//')  # Remove leading zero from day
 # Note paths
 DAILY_NOTE_DIR="$HOME/notes/daily/$YEAR/$MONTH-$MONTH_NAME"
 DAILY_NOTE="$DAILY_NOTE_DIR/$TODAY.md"
-TEMPLATE_FILE="$PROJECT_DIR/daily-note-template.txt"
 
 # Config file options
 CONFIG_DIR="$HOME/.config/dev-tools"
@@ -42,21 +59,11 @@ CONFIGS=(
 # Create daily notes directory structure if needed
 mkdir -p "$DAILY_NOTE_DIR"
 
-# Create daily note if it doesn't exist
+# Check if daily note exists
 if [ ! -f "$DAILY_NOTE" ]; then
-  if [ -f "$TEMPLATE_FILE" ]; then
-    # Create the file using the template
-    cat "$TEMPLATE_FILE" | \
-      sed "s/\$MONTH_FULL/$MONTH_FULL/g" | \
-      sed "s/\$DAY/$DAY/g" | \
-      sed "s/\$YEAR/$YEAR/g" | \
-      sed "s/\$TODAY/$TODAY/g" > "$DAILY_NOTE"
-  else
-    # Skip creating the daily note file if template doesn't exist
-    echo "Template file not found at $TEMPLATE_FILE. Will only output PR summary."
-    # Set DAILY_NOTE to empty to indicate we don't want to update it
-    DAILY_NOTE=""
-  fi
+  echo "Daily note not found at $DAILY_NOTE. Will only output PR summary."
+  # Set DAILY_NOTE to empty to indicate we don't want to update it
+  DAILY_NOTE=""
 fi
 
 # Find a valid config file
@@ -115,10 +122,12 @@ fi
 READY_FILE=$(mktemp)
 NEEDS_ATTENTION_FILE=$(mktemp)
 OTHER_FILE=$(mktemp)
+QUICK_FIX_READY_FILE=$(mktemp)
+QUICK_FIX_ATTENTION_FILE=$(mktemp)
 
 # Create temporary directory for working files
 TEMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TEMP_DIR" "$READY_FILE" "$NEEDS_ATTENTION_FILE" "$OTHER_FILE"' EXIT
+trap 'rm -rf "$TEMP_DIR" "$READY_FILE" "$NEEDS_ATTENTION_FILE" "$OTHER_FILE" "$QUICK_FIX_READY_FILE" "$QUICK_FIX_ATTENTION_FILE"' EXIT
 
 # Process each repository
 for i in "${!REPO_PATHS[@]}"; do
@@ -249,16 +258,27 @@ for i in "${!REPO_PATHS[@]}"; do
     REVIEW_DECISION=$(echo "$REVIEW_STATUS" | jq -r '.reviewDecision // "NONE"')
     [ -z "$REVIEW_DECISION" ] && REVIEW_DECISION="UNKNOWN"
     
-    # Get the full PR title from GitHub
-    echo "    Getting full PR title..."
-    PR_TITLE_DATA=$(gh pr view "$PR_NUM" --json title 2>/dev/null)
-    if [ -n "$PR_TITLE_DATA" ]; then
+    # Get the full PR title and branch from GitHub
+    echo "    Getting full PR title and branch..."
+    PR_DATA=$(gh pr view "$PR_NUM" --json title,headRefName 2>/dev/null)
+    if [ -n "$PR_DATA" ]; then
       # Extract the title from the JSON response
-      FULL_PR_TITLE=$(echo "$PR_TITLE_DATA" | jq -r '.title // empty')
+      FULL_PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // empty')
       if [ -n "$FULL_PR_TITLE" ]; then
         echo "    Found PR title: $FULL_PR_TITLE"
         PR_TITLE_CLEAN="$FULL_PR_TITLE"
       fi
+      
+      # Extract the branch name
+      PR_BRANCH=$(echo "$PR_DATA" | jq -r '.headRefName // empty')
+      echo "    Found PR branch: $PR_BRANCH"
+    fi
+    
+    # Check if this is a quick-fix PR
+    IS_QUICK_FIX="false"
+    if [[ "$PR_BRANCH" == *"quick-fix"* ]]; then
+      IS_QUICK_FIX="true"
+      echo "    This is a quick-fix PR"
     fi
     
     # Ensure numeric values are actually numeric
@@ -318,19 +338,29 @@ for i in "${!REPO_PATHS[@]}"; do
       FULL_PR_ENTRY="$PR_ENTRY"
     fi
     
-    # Determine PR category based on problems
+    # Determine PR category based on problems and quick-fix status
     if [ "$FAILING_CHECKS" -eq 0 ] && 
        [ "$COMMENT_COUNT" -eq 0 ] && 
        [ "$MERGEABLE" != "CONFLICTING" ] && 
        [ "$IS_DRAFT" != "true" ] && 
        [ "$REVIEW_DECISION" != "CHANGES_REQUESTED" ]; then
       # Ready for merge - All checks passing, no comments, no conflicts, not a draft, no changes requested
-      echo -e "$FULL_PR_ENTRY" >> "$READY_FILE"
-      echo "    Category: Ready for Merge (no issues)"
+      if [ "$IS_QUICK_FIX" == "true" ]; then
+        echo -e "$FULL_PR_ENTRY" >> "$QUICK_FIX_READY_FILE"
+        echo "    Category: Quick-Fix Ready for Merge (no issues)"
+      else
+        echo -e "$FULL_PR_ENTRY" >> "$READY_FILE"
+        echo "    Category: Ready for Merge (no issues)"
+      fi
     else
       # Needs attention - Has at least one problem
-      echo -e "$FULL_PR_ENTRY" >> "$NEEDS_ATTENTION_FILE"
-      echo "    Category: Needs Attention ($REASONS)"
+      if [ "$IS_QUICK_FIX" == "true" ]; then
+        echo -e "$FULL_PR_ENTRY" >> "$QUICK_FIX_ATTENTION_FILE"
+        echo "    Category: Quick-Fix Needs Attention ($REASONS)"
+      else
+        echo -e "$FULL_PR_ENTRY" >> "$NEEDS_ATTENTION_FILE"
+        echo "    Category: Needs Attention ($REASONS)"
+      fi
     fi
   done
 done
@@ -354,35 +384,65 @@ cat > "$PR_REVIEW_FILE" << EOF
 
 > Last updated: $(date '+%Y-%m-%d %H:%M:%S')  |  Total PRs: $TOTAL_PRS
 
-**PRs Ready for Merge:**
-*All checks passing, no unresolved comments, no changes requested, no conflicts, not a draft*
+**Quick-Fix PRs Ready for Merge:**
+*Fast-track PRs with "quick-fix" in branch name - All checks passing, ready to merge*
 EOF
 
-# Add ready PRs
+# Add quick-fix ready PRs
+if [ ! -s "$QUICK_FIX_READY_FILE" ]; then
+  echo "- No quick-fix PRs ready for merge" >> "$PR_REVIEW_FILE"
+else
+  # Output each entry directly
+  cat "$QUICK_FIX_READY_FILE" >> "$PR_REVIEW_FILE"
+  # Count PRs ready for merge - count lines that start with hyphen
+  QUICK_FIX_READY_COUNT=$(grep -c "^-" "$QUICK_FIX_READY_FILE")
+  echo "" >> "$PR_REVIEW_FILE" 
+  echo "> Total: $QUICK_FIX_READY_COUNT quick-fix PR(s) ready for merge" >> "$PR_REVIEW_FILE"
+fi
+echo "" >> "$PR_REVIEW_FILE"
+
+# Add quick-fix PRs needing attention
+echo "**Quick-Fix PRs Needing Attention:**" >> "$PR_REVIEW_FILE"
+echo "*Quick-fix PRs with failing checks, unresolved comments, conflicts, or other issues*" >> "$PR_REVIEW_FILE"
+if [ ! -s "$QUICK_FIX_ATTENTION_FILE" ]; then
+  echo "- No quick-fix PRs needing attention" >> "$PR_REVIEW_FILE"
+else
+  # Output each entry directly
+  cat "$QUICK_FIX_ATTENTION_FILE" >> "$PR_REVIEW_FILE"
+  # Count PRs needing attention - each PR takes up 2 lines with the reasons on the second line
+  QUICK_FIX_ATTENTION_COUNT=$(grep -c "^-" "$QUICK_FIX_ATTENTION_FILE")
+  echo "" >> "$PR_REVIEW_FILE"
+  echo "> Total: $QUICK_FIX_ATTENTION_COUNT quick-fix PR(s) needing attention" >> "$PR_REVIEW_FILE"
+fi
+echo "" >> "$PR_REVIEW_FILE"
+
+# Add regular PRs ready for merge
+echo "**Regular PRs Ready for Merge:**" >> "$PR_REVIEW_FILE"
+echo "*All checks passing, no unresolved comments, no changes requested, no conflicts, not a draft*" >> "$PR_REVIEW_FILE"
 if [ ! -s "$READY_FILE" ]; then
-  echo "- No PRs ready for merge" >> "$PR_REVIEW_FILE"
+  echo "- No regular PRs ready for merge" >> "$PR_REVIEW_FILE"
 else
   # Output each entry directly
   cat "$READY_FILE" >> "$PR_REVIEW_FILE"
   # Count PRs ready for merge - count lines that start with hyphen
   READY_COUNT=$(grep -c "^-" "$READY_FILE")
   echo "" >> "$PR_REVIEW_FILE" 
-  echo "> Total: $READY_COUNT PR(s) ready for merge" >> "$PR_REVIEW_FILE"
+  echo "> Total: $READY_COUNT regular PR(s) ready for merge" >> "$PR_REVIEW_FILE"
 fi
 echo "" >> "$PR_REVIEW_FILE"
 
-# Add PRs needing attention
-echo "**PRs Needing Attention:**" >> "$PR_REVIEW_FILE"
-echo "*PRs with failing checks, unresolved comments, conflicts, or other issues*" >> "$PR_REVIEW_FILE"
+# Add regular PRs needing attention
+echo "**Regular PRs Needing Attention:**" >> "$PR_REVIEW_FILE"
+echo "*Regular PRs with failing checks, unresolved comments, conflicts, or other issues*" >> "$PR_REVIEW_FILE"
 if [ ! -s "$NEEDS_ATTENTION_FILE" ]; then
-  echo "- No PRs needing attention" >> "$PR_REVIEW_FILE"
+  echo "- No regular PRs needing attention" >> "$PR_REVIEW_FILE"
 else
   # Output each entry directly
   cat "$NEEDS_ATTENTION_FILE" >> "$PR_REVIEW_FILE"
   # Count PRs needing attention - each PR takes up 2 lines with the reasons on the second line
   ATTENTION_COUNT=$(grep -c "^-" "$NEEDS_ATTENTION_FILE")
   echo "" >> "$PR_REVIEW_FILE"
-  echo "> Total: $ATTENTION_COUNT PR(s) needing attention" >> "$PR_REVIEW_FILE"
+  echo "> Total: $ATTENTION_COUNT regular PR(s) needing attention" >> "$PR_REVIEW_FILE"
 fi
 echo "" >> "$PR_REVIEW_FILE"
 
@@ -402,6 +462,19 @@ echo "" >> "$PR_REVIEW_FILE"
 
 # Output or update the daily note
 if [ -n "$DAILY_NOTE" ] && [ -f "$DAILY_NOTE" ]; then
+  # Check if daily note has the required separator
+  if ! grep -q "^--- 📋 PR Review End ---$" "$DAILY_NOTE"; then
+    echo "ERROR: Daily note $DAILY_NOTE is missing required separator '--- 📋 PR Review End ---'"
+    echo "Please add this separator to mark where the PR script should stop updating content."
+    echo "The separator should be placed before any sections you want to preserve (like session tracking)."
+    echo ""
+    echo "Just outputting PR summary to stdout instead:"
+    echo "================ PR REVIEW SUMMARY ================"
+    cat "$PR_REVIEW_FILE"
+    echo "=================================================="
+    exit 1
+  fi
+  
   # Create a temporary file for the updated content
   TEMP_FILE=$(mktemp)
   
@@ -420,19 +493,22 @@ if [ -n "$DAILY_NOTE" ] && [ -f "$DAILY_NOTE" ]; then
     # Add PR Reviews section
     cat "$PR_REVIEW_FILE"
     
-    # Add Other Tasks section
-    echo "### Other Tasks"
-    echo ""
-    echo "- "
-    echo "- "
-    echo ""
-    
-    # Add Notes & Observations section
-    echo "## Notes & Observations"
-    echo ""
-    echo "- "
-    echo "- "
-    echo ""
+    # Add remaining sections from template if it exists
+    if [ -f "$TEMPLATE_FILE" ]; then
+      # Check if template has the required separator
+      if ! grep -q "^--- 📋 PR Review End ---$" "$TEMPLATE_FILE"; then
+        echo "Warning: Template file $TEMPLATE_FILE is missing required separator '--- 📋 PR Review End ---'"
+        echo "Please add this separator to mark where the PR script should stop extracting content."
+        # Continue without adding template sections
+      else
+        # Extract everything after PR Reviews from the template, preserving structure
+        sed -n '/^--- 📋 PR Review End ---$/,/^--- 📋 PR Review End ---$/p' "$TEMPLATE_FILE" | \
+          head -n -1 | \
+          sed "s/{{date:YYYY-MM-DD}}/$TODAY/g" | \
+          sed "s/{{date:MMMM D, YYYY}}/$MONTH_FULL $DAY, $YEAR/g" | \
+          sed "s/{{time:HH:mm:ss}}/$(date '+%H:%M:%S')/g"
+      fi
+    fi
   } > "$TEMP_FILE"
   
   # Replace the original file with our new version
