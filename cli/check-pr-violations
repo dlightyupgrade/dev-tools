@@ -74,7 +74,19 @@ VIOLATIONS_JSON=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r 
 
 VIOLATIONS_COUNT=$(echo "$VIOLATIONS_JSON" | jq 'length')
 
-# Check for review threads
+# Check PR status and CI checks
+echo "🔍 Checking PR status and CI checks..."
+PR_INFO=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER")
+MERGEABLE=$(echo "$PR_INFO" | jq -r '.mergeable // "unknown"')
+MERGEABLE_STATE=$(echo "$PR_INFO" | jq -r '.mergeable_state // "unknown"')
+HEAD_SHA=$(echo "$PR_INFO" | jq -r '.head.sha')
+
+# Get check runs (more comprehensive than status API)
+CHECK_RUNS=$(gh api "repos/$OWNER/$REPO/commits/$HEAD_SHA/check-runs" | jq '.check_runs')
+FAILED_CHECKS=$(echo "$CHECK_RUNS" | jq -r '.[] | select(.conclusion == "failure") | .name')
+FAILED_CHECK_COUNT=$(echo "$CHECK_RUNS" | jq '[.[] | select(.conclusion == "failure")] | length')
+PENDING_CHECK_COUNT=$(echo "$CHECK_RUNS" | jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
+
 echo "🔍 Checking review threads..."
 REVIEW_THREADS=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r '
     group_by(.original_position // .position) | 
@@ -92,14 +104,59 @@ REVIEW_THREADS=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r '
 
 REVIEW_THREADS_COUNT=$(echo "$REVIEW_THREADS" | jq 'length')
 
+# Check for stale PR warnings from GitHub Actions
+STALE_COMMENTS=$(gh pr view "$PR_NUMBER" --comments --json comments | jq -r '.comments[] | select(.author.login == "github-actions[bot]" or .author.login == "github-actions") | select(.body | contains("stale") or contains("Stale")) | .body')
+STALE_COUNT=$(echo "$STALE_COMMENTS" | grep -c "stale\|Stale" 2>/dev/null || echo 0)
+
 # Get PR author
 PR_AUTHOR=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER" | jq -r '.user.login')
 
-if [ "$VIOLATIONS_COUNT" -eq 0 ] && [ "$REVIEW_THREADS_COUNT" -eq 0 ]; then
-    echo "✅ No violations or unresolved review threads found in PR #$PR_NUMBER"
+# Display CI status and merge conflicts
+if [ "$MERGEABLE" = "false" ] || [ "$MERGEABLE_STATE" = "dirty" ]; then
+    echo "🚨 MERGE CONFLICTS:"
+    case "$MERGEABLE_STATE" in
+        "dirty")
+            echo "❌ Merge conflicts detected - branch has conflicts with base branch"
+            echo "🔧 Action needed: Resolve conflicts by rebasing or merging base branch"
+            ;;
+        "unstable")
+            echo "⚠️  CI checks failing - merge blocked by failing status checks"
+            ;;
+        *)
+            echo "❓ Cannot merge - state: $MERGEABLE_STATE"
+            ;;
+    esac
+    echo ""
+fi
+
+if [ "$FAILED_CHECK_COUNT" -gt 0 ]; then
+    echo "❌ FAILED CI CHECKS:"
+    echo "$FAILED_CHECKS" | while read -r check; do
+        [ -n "$check" ] && echo "  💥 $check"
+    done
+    echo ""
+fi
+
+if [ "$PENDING_CHECK_COUNT" -gt 0 ]; then
+    echo "⏳ CI checks still running ($PENDING_CHECK_COUNT pending)"
+    echo ""
+fi
+
+# Display stale PR warnings
+if [ "$STALE_COUNT" -gt 0 ]; then
+    echo "⚠️  STALE PR WARNING:"
+    echo "$STALE_COMMENTS" | head -1 | while read -r comment; do
+        echo "🕐 $comment"
+    done
+    echo ""
+fi
+
+# Check if PR is completely clean
+if [ "$VIOLATIONS_COUNT" -eq 0 ] && [ "$REVIEW_THREADS_COUNT" -eq 0 ] && [ "$FAILED_CHECK_COUNT" -eq 0 ] && [ "$MERGEABLE" != "false" ] && [ "$MERGEABLE_STATE" != "dirty" ] && [ "$STALE_COUNT" -eq 0 ]; then
+    echo "✅ No violations, review threads, CI issues, or stale warnings found in PR #$PR_NUMBER"
     if [ "$CLAUDE_MODE" == "--claude" ]; then
         echo ""
-        echo "🤖 No todo items needed - PR is clean!"
+        echo "🤖 No todo items needed - PR is completely clean!"
     fi
     exit 0
 fi
@@ -122,7 +179,13 @@ if [ "$REVIEW_THREADS_COUNT" -gt 0 ]; then
     echo ""
 fi
 
-echo "📊 Summary: Found $VIOLATIONS_COUNT violation(s) and $REVIEW_THREADS_COUNT review thread(s)"
+echo "📊 Summary: Found $VIOLATIONS_COUNT violation(s), $REVIEW_THREADS_COUNT review thread(s), $FAILED_CHECK_COUNT failed check(s), $STALE_COUNT stale warning(s)"
+if [ "$MERGEABLE" = "false" ] || [ "$MERGEABLE_STATE" = "dirty" ]; then
+    echo "🚨 Merge conflicts detected - cannot merge until resolved"
+fi
+if [ "$STALE_COUNT" -gt 0 ]; then
+    echo "⚠️  Stale PR detected - may be auto-closed soon"
+fi
 
 # Claude mode - generate todo list
 if [ "$CLAUDE_MODE" == "--claude" ]; then
@@ -130,10 +193,13 @@ if [ "$CLAUDE_MODE" == "--claude" ]; then
     echo "🤖 Generating todo list for Claude Code..."
     echo ""
     
-    # Count actionable items (violations + threads needing author response)
+    # Count actionable items (violations + threads needing author response + CI failures + merge conflicts + stale warnings)
     ACTIONABLE_VIOLATIONS=$VIOLATIONS_COUNT
     ACTIONABLE_THREADS=$(echo "$REVIEW_THREADS" | jq --arg pr_author "$PR_AUTHOR" '[.[] | select(.last_comment_author != $pr_author)] | length')
-    TOTAL_ACTIONABLE=$((ACTIONABLE_VIOLATIONS + ACTIONABLE_THREADS))
+    ACTIONABLE_CI=$FAILED_CHECK_COUNT
+    ACTIONABLE_MERGE=$([ "$MERGEABLE" = "false" ] || [ "$MERGEABLE_STATE" = "dirty" ] && echo 1 || echo 0)
+    ACTIONABLE_STALE=$STALE_COUNT
+    TOTAL_ACTIONABLE=$((ACTIONABLE_VIOLATIONS + ACTIONABLE_THREADS + ACTIONABLE_CI + ACTIONABLE_MERGE + ACTIONABLE_STALE))
     
     if [ "$TOTAL_ACTIONABLE" -eq 0 ]; then
         echo "🎉 No actionable items found!"
@@ -162,6 +228,37 @@ if [ "$CLAUDE_MODE" == "--claude" ]; then
             while read -r todo; do
                 echo "  $todo"
             done
+        fi
+        
+        # Add CI failure todos
+        if [ "$ACTIONABLE_CI" -gt 0 ]; then
+            TODO_BASE=$((VIOLATIONS_COUNT + ACTIONABLE_THREADS))
+            COUNTER=1
+            echo "$FAILED_CHECKS" | while read -r check; do
+                if [ -n "$check" ]; then
+                    echo "  TODO #$((TODO_BASE + COUNTER)): Fix failed CI check: $check"
+                    ((COUNTER++))
+                fi
+            done
+        fi
+        
+        # Add merge conflict todo
+        if [ "$ACTIONABLE_MERGE" -gt 0 ]; then
+            TODO_NUM=$((VIOLATIONS_COUNT + ACTIONABLE_THREADS + ACTIONABLE_CI + 1))
+            case "$MERGEABLE_STATE" in
+                "dirty")
+                    echo "  TODO #$TODO_NUM: Resolve merge conflicts (rebase or merge base branch)"
+                    ;;
+                *)
+                    echo "  TODO #$TODO_NUM: Fix merge issues (state: $MERGEABLE_STATE)"
+                    ;;
+            esac
+        fi
+        
+        # Add stale PR todo
+        if [ "$ACTIONABLE_STALE" -gt 0 ]; then
+            TODO_NUM=$((VIOLATIONS_COUNT + ACTIONABLE_THREADS + ACTIONABLE_CI + ACTIONABLE_MERGE + 1))
+            echo "  TODO #$TODO_NUM: Address stale PR warning (add activity or remove stale label)"
         fi
         
         echo ""
