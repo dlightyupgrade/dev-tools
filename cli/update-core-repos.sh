@@ -61,7 +61,7 @@ set -euo pipefail
 # CONFIGURATION & CONSTANTS
 #===============================================================
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly VERSION="3.1.1"
+readonly VERSION="3.1.2"
 readonly PROJECTS_DIR="$HOME/code"
 readonly CONFIG_DIR="$HOME/.config/dev-tools"
 readonly CONFIG_FILE_NAME="project-list.txt"
@@ -496,12 +496,12 @@ git_rebase_branches() {
                 [[ "$VERBOSE" == "true" ]] && printf "  Checking conflicts for %s...\n" "$branch"
                 if git merge-tree "$merge_base" "$branch" "$BASE_BRANCH" | grep -q "<<<<<<< "; then
                     failed_branches+=("$branch(conflicts-detected)")
-                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Skipping %s (conflicts detected)\n" "$branch"
+                    printf "  ✗ Skipping %s (conflicts detected)\n" "$branch"
                     continue
                 fi
                 
                 # Attempt rebase only if no conflicts detected
-                [[ "$VERBOSE" == "true" ]] && printf "  Rebasing %s on %s...\n" "$branch" "$BASE_BRANCH"
+                printf "  Rebasing %s on %s...\n" "$branch" "$BASE_BRANCH"
                 
                 # Start rebase and immediately check for conflicts
                 if git rebase "$BASE_BRANCH" --quiet 2>/dev/null; then
@@ -510,18 +510,18 @@ git_rebase_branches() {
                         [[ "$VERBOSE" == "true" ]] && printf "  Pushing %s to origin...\n" "$branch"
                         if git push origin "$branch" --force --quiet 2>/dev/null; then
                             success_branches+=("$branch")
-                            [[ "$VERBOSE" == "true" ]] && printf "  ✓ Successfully rebased and pushed %s\n" "$branch"
+                            printf "  ✓ Successfully rebased and pushed %s\n" "$branch"
                         else
                             success_branches+=("$branch(push-failed)")
-                            [[ "$VERBOSE" == "true" ]] && printf "  ✓ Rebased %s but push failed\n" "$branch"
+                            printf "  ✓ Rebased %s but push failed\n" "$branch"
                         fi
                     else
                         success_branches+=("$branch")
-                        [[ "$VERBOSE" == "true" ]] && printf "  ✓ Successfully rebased %s\n" "$branch"
+                        printf "  ✓ Successfully rebased %s\n" "$branch"
                     fi
                 else
                     # CRITICAL: Always abort any ongoing rebase operation
-                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Rebase failed for %s - aborting\n" "$branch"
+                    printf "  ✗ Rebase failed for %s - aborting\n" "$branch"
                     
                     # Force abort any rebase state - multiple attempts for safety
                     git rebase --abort --quiet 2>/dev/null || true
@@ -542,7 +542,7 @@ git_rebase_branches() {
                     fi
                     
                     failed_branches+=("$branch(rebase-failed)")
-                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Failed to rebase %s (conflicts/failure - aborted)\n" "$branch"
+                    printf "  ✗ Failed to rebase %s (conflicts/failure - aborted)\n" "$branch"
                 fi
             else
                 skipped_branches+=("$branch(not-found)")
