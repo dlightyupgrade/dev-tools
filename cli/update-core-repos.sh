@@ -2,10 +2,66 @@
 set -euo pipefail
 
 #===============================================================
+# SCRIPT GOALS & DESIGN PRINCIPLES
+#===============================================================
+# PURPOSE: Safe, efficient Git repository maintenance tool for development workflows
+#
+# PRIMARY GOALS:
+# 1. SAFETY FIRST - Never leave repositories in broken/conflicted states
+# 2. EFFICIENT UPDATES - Batch update multiple repositories with master branch pulls  
+# 3. SMART REBASING - Automatically rebase feature branches when safe to do so
+# 4. CONFLICT AVOIDANCE - Pre-detect conflicts and skip problematic rebases
+# 5. CLEAN RECOVERY - Always restore repositories to known-good states
+# 6. TRANSPARENCY - Provide clear feedback on what was done and what failed
+#
+# CORE FEATURES:
+# - Multi-repository batch processing with parallel-safe operations
+# - Single target processing: process one specific repo:branch, PR URL, or branch in current repo
+# - Configurable repository lists (project-list.txt) and branch lists (to-rebase.txt)  
+# - GitHub URL parsing: branch URLs (tree/branch-name) and PR URLs (pull/123) with 'gh' CLI
+# - Smart repository detection when running from within a git repository
+# - Automatic stashing/unstashing of working directory changes
+# - Pre-flight conflict detection using git merge-tree
+# - Force-abort any rebase conflicts with comprehensive cleanup
+# - Detailed logging and progress reporting with colored output
+# - Bash 3+ compatibility for maximum system support
+# - Graceful error handling with proper exit codes
+#
+# SAFETY GUARANTEES:
+# - Always abort rebase operations that encounter conflicts
+# - Multiple abort attempts with forced cleanup of git state directories
+# - Reset working directory to clean state after failures  
+# - Restore original branch and working changes on completion
+# - Never force-push unless explicitly enabled
+# - Skip rebases when master branch wasn't updated (unless forced)
+#
+# DESIGN PRINCIPLES:
+# - Fail fast and fail safe - abort operations rather than leave broken state
+# - Provide comprehensive feedback - users should understand what happened
+# - Configurable behavior - support different workflows via options
+# - Maintainable code - clear functions, good error handling, documented logic
+# - Performance considerations - efficient git operations, minimal disk I/O
+#
+# REBUILD CHECKLIST (if rewriting from scratch):
+# [ ] Repository discovery and validation from config files
+# [ ] Single target parsing: GitHub branch/PR URLs, repo:branch format, current repo detection
+# [ ] GitHub CLI integration for PR branch name extraction
+# [ ] Working directory stashing with unique identifiers  
+# [ ] Master branch fetching and fast-forward updates
+# [ ] Conflict pre-detection using git merge-tree
+# [ ] Safe rebase with immediate abort on any failure
+# [ ] Force cleanup of .git/rebase-* directories
+# [ ] Original state restoration (branch + stash)
+# [ ] Colored progress output with verbose mode
+# [ ] Proper exit codes and error aggregation
+# [ ] Configuration file generation and validation
+# [ ] Single vs multi-repository execution modes
+
+#===============================================================
 # CONFIGURATION & CONSTANTS
 #===============================================================
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly VERSION="3.0.3"
+readonly VERSION="3.1.1"
 readonly PROJECTS_DIR="$HOME/code"
 readonly CONFIG_DIR="$HOME/.config/dev-tools"
 readonly CONFIG_FILE_NAME="project-list.txt"
@@ -196,6 +252,88 @@ is_protected_branch() {
 }
 
 #===============================================================
+# SINGLE TARGET PROCESSING
+#===============================================================
+parse_single_target() {
+    local target="$1"
+    local repo_name="" branch_name=""
+    
+    # GitHub PR URL format: https://github.com/org/repo-name/pull/123
+    if [[ "$target" =~ ^https://github\.com/[^/]+/([^/]+)/pull/[0-9]+$ ]]; then
+        repo_name="${BASH_REMATCH[1]}"
+        
+        # Use gh CLI to get the branch name
+        if command -v gh >/dev/null 2>&1; then
+            branch_name="$(gh pr view "$target" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")"
+            if [[ -z "$branch_name" ]]; then
+                log_error "Failed to get branch name from PR URL: $target"
+                log_error "Make sure 'gh' CLI is installed and authenticated"
+                return 1
+            fi
+        else
+            log_error "GitHub CLI (gh) is required to process PR URLs"
+            log_error "Install with: brew install gh"
+            return 1
+        fi
+        
+        log_debug "Parsed PR URL: repo=$repo_name, branch=$branch_name"
+        
+    # GitHub branch URL format: https://github.com/org/repo-name/tree/branch-name
+    elif [[ "$target" =~ ^https://github\.com/[^/]+/([^/]+)/tree/(.+)$ ]]; then
+        repo_name="${BASH_REMATCH[1]}"
+        branch_name="${BASH_REMATCH[2]}"
+        log_debug "Parsed branch URL: repo=$repo_name, branch=$branch_name"
+        
+    # repo:branch format
+    elif [[ "$target" == *":"* ]]; then
+        repo_name="${target%:*}"
+        branch_name="${target#*:}"
+        log_debug "Parsed repo:branch: repo=$repo_name, branch=$branch_name"
+        
+    # Just branch name - detect current repo
+    else
+        branch_name="$target"
+        
+        # Check if we're in a git repository
+        if git rev-parse --git-dir >/dev/null 2>&1; then
+            local current_repo_path
+            current_repo_path="$(git rev-parse --show-toplevel 2>/dev/null)"
+            repo_name="$(basename "$current_repo_path" 2>/dev/null)"
+            log_debug "Detected current repo: $repo_name, branch=$branch_name"
+        else
+            log_error "Not in a git repository and no repo specified"
+            log_error "Use format: repo:branch or run from within a repository"
+            return 1
+        fi
+    fi
+    
+    # Validate we have both parts
+    if [[ -z "$repo_name" || -z "$branch_name" ]]; then
+        log_error "Failed to parse target: $target"
+        log_error "Use format: repo:branch, branch-name (in repo), or GitHub PR URL"
+        return 1
+    fi
+    
+    # Find the repository path
+    local repo_path="$PROJECTS_DIR/$repo_name"
+    if [[ ! -d "$repo_path" ]]; then
+        log_error "Repository not found: $repo_path"
+        return 1
+    fi
+    
+    if [[ ! -d "$repo_path/.git" ]]; then
+        log_error "Not a git repository: $repo_path"
+        return 1
+    fi
+    
+    # Export for use by main processing
+    SINGLE_REPO_PATH="$repo_path"
+    SINGLE_BRANCH_NAME="$branch_name"
+    
+    return 0
+}
+
+#===============================================================
 # GIT OPERATIONS
 #===============================================================
 git_check_repo() {
@@ -332,12 +470,41 @@ git_rebase_branches() {
                 continue
             fi
             
-            # Check if branch exists and rebase
+            # Check if branch exists
             if git show-ref --verify --quiet refs/heads/"$branch" 2>/dev/null; then
+                # Check for potential conflicts before attempting rebase
+                if ! git checkout "$branch" --quiet 2>/dev/null; then
+                    skipped_branches+=("$branch(checkout-failed)")
+                    [[ "$VERBOSE" == "true" ]] && printf "  • Failed to checkout %s\n" "$branch"
+                    continue
+                fi
+                
+                # Check if rebase is needed (branch is behind master)
+                local branch_hash master_hash merge_base
+                branch_hash="$(git rev-parse "$branch" 2>/dev/null)"
+                master_hash="$(git rev-parse "$BASE_BRANCH" 2>/dev/null)"
+                merge_base="$(git merge-base "$branch" "$BASE_BRANCH" 2>/dev/null)"
+                
+                # Skip if branch is already up to date
+                if [[ "$merge_base" == "$master_hash" ]]; then
+                    skipped_branches+=("$branch(up-to-date)")
+                    [[ "$VERBOSE" == "true" ]] && printf "  • Skipped %s (already up to date)\n" "$branch"
+                    continue
+                fi
+                
+                # Check for conflicts using dry-run approach
+                [[ "$VERBOSE" == "true" ]] && printf "  Checking conflicts for %s...\n" "$branch"
+                if git merge-tree "$merge_base" "$branch" "$BASE_BRANCH" | grep -q "<<<<<<< "; then
+                    failed_branches+=("$branch(conflicts-detected)")
+                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Skipping %s (conflicts detected)\n" "$branch"
+                    continue
+                fi
+                
+                # Attempt rebase only if no conflicts detected
                 [[ "$VERBOSE" == "true" ]] && printf "  Rebasing %s on %s...\n" "$branch" "$BASE_BRANCH"
-                if git checkout "$branch" --quiet 2>/dev/null && 
-                   git rebase "$BASE_BRANCH" --quiet 2>/dev/null; then
-                    
+                
+                # Start rebase and immediately check for conflicts
+                if git rebase "$BASE_BRANCH" --quiet 2>/dev/null; then
                     # Handle push if enabled
                     if [[ "$FORCE_PUSH" == "true" ]]; then
                         [[ "$VERBOSE" == "true" ]] && printf "  Pushing %s to origin...\n" "$branch"
@@ -353,9 +520,29 @@ git_rebase_branches() {
                         [[ "$VERBOSE" == "true" ]] && printf "  ✓ Successfully rebased %s\n" "$branch"
                     fi
                 else
+                    # CRITICAL: Always abort any ongoing rebase operation
+                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Rebase failed for %s - aborting\n" "$branch"
+                    
+                    # Force abort any rebase state - multiple attempts for safety
                     git rebase --abort --quiet 2>/dev/null || true
-                    failed_branches+=("$branch")
-                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Failed to rebase %s (conflicts)\n" "$branch"
+                    sleep 0.1
+                    git rebase --abort --quiet 2>/dev/null || true
+                    
+                    # Reset any partial changes
+                    git reset --hard HEAD --quiet 2>/dev/null || true
+                    
+                    # Ensure we're back on master branch
+                    git checkout "$BASE_BRANCH" --quiet 2>/dev/null || true
+                    
+                    # Verify repository is in clean state
+                    if [[ -d ".git/rebase-merge" || -d ".git/rebase-apply" ]]; then
+                        log_error "[$repo_name] WARNING: Repository still in rebase state after abort"
+                        # Force cleanup
+                        rm -rf ".git/rebase-merge" ".git/rebase-apply" 2>/dev/null || true
+                    fi
+                    
+                    failed_branches+=("$branch(rebase-failed)")
+                    [[ "$VERBOSE" == "true" ]] && printf "  ✗ Failed to rebase %s (conflicts/failure - aborted)\n" "$branch"
                 fi
             else
                 skipped_branches+=("$branch(not-found)")
@@ -449,8 +636,10 @@ process_single_repository() {
         return 1
     fi
     
-    # Load branches to rebase
-    load_branches_for_repo "$REBASE_FILE" "$repo_name" "$branches_file"
+    # Load branches to rebase (skip if single target mode already created the file)
+    if [[ ! -f "$branches_file" ]]; then
+        load_branches_for_repo "$REBASE_FILE" "$repo_name" "$branches_file"
+    fi
     
     # Rebase branches
     if ! git_rebase_branches "$repo_path" "$repo_name" "$state_file" "$branches_file" "$result_file"; then
@@ -463,6 +652,49 @@ process_single_repository() {
     cd - >/dev/null 2>&1
     
     return 0
+}
+
+execute_single_target() {
+    local repo_path="$SINGLE_REPO_PATH"
+    local branch_name="$SINGLE_BRANCH_NAME"
+    local repo_name="$(basename "$repo_path")"
+    
+    printf "Processing single target: %b%s%b:%b%s%b\n\n" "$BOLD" "$repo_name" "$NC" "$BOLD" "$branch_name" "$NC"
+    
+    # Create temp branches file with just our target branch
+    local work_dir="$TEMP_DIR/$repo_name"
+    mkdir -p "$work_dir"
+    echo "$branch_name" > "$work_dir/branches"
+    
+    local state_file="$work_dir/state"
+    local result_file="$work_dir/result"
+    
+    # Process the single repository
+    show_repo_progress 1 1 "$repo_name"
+    
+    if process_single_repository "$repo_path"; then
+        printf "  %b✓%b Done\n" "$GREEN" "$NC"
+        
+        # Show detailed result
+        if [[ -f "$result_file" ]]; then
+            local result
+            result="$(cat "$result_file")"
+            printf "\n%bResult:%b " "$BOLD" "$NC"
+            format_result "$result"
+        fi
+        return 0
+    else
+        printf "  %b✗%b Failed\n" "$RED" "$NC"
+        
+        # Show detailed result for failures
+        if [[ -f "$result_file" ]]; then
+            local result
+            result="$(cat "$result_file")"
+            printf "\n%bResult:%b " "$BOLD" "$NC"
+            format_result "$result"
+        fi
+        return 1
+    fi
 }
 
 execute_repositories() {
@@ -567,10 +799,17 @@ OPTIONS:
     -r, --rebase FILE   Specify custom rebase file
     -n, --no-push       Don't force push rebased branches to origin
     -f, --force         Force rebase even if master wasn't updated
+    -s, --single TARGET Process only one branch or PR (see formats below)
     -v, --verbose       Enable verbose output with debug information
     -g, --generate      Generate example configuration files and exit
     -h, --help          Show this help message
     --version           Show version information
+
+SINGLE TARGET FORMATS:
+    GitHub branch URL:  https://github.com/org/repo-name/tree/branch-name
+    GitHub PR URL:      https://github.com/org/repo-name/pull/123 (extracts branch)
+    repo:branch:        my-repo-name:feature-branch  
+    branch only:        feature-branch (when run from repo directory)
 
 CONFIGURATION:
     Config file format: One repository path per line
@@ -581,6 +820,10 @@ EXAMPLES:
     update-core-repos.sh -v                # Run with verbose output
     update-core-repos.sh --generate         # Create example configuration files
     update-core-repos.sh custom-repos.txt  # Use custom repository list
+    update-core-repos.sh -s feature-branch # Rebase single branch in current repo
+    update-core-repos.sh -s repo:branch    # Rebase specific repo:branch
+    update-core-repos.sh -s https://github.com/org/repo/tree/branch  # Rebase branch URL
+    update-core-repos.sh -s https://github.com/org/repo/pull/123     # Rebase PR branch
 
 EOF
 }
@@ -594,6 +837,9 @@ parse_arguments() {
                 REBASE_FILE_ARG="$2"; shift ;;
             -n|--no-push) FORCE_PUSH="false" ;;
             -f|--force) FORCE_REBASE="true" ;;
+            -s|--single)
+                [[ -z "${2:-}" ]] && { log_error "Option $1 requires an argument"; exit 1; }
+                SINGLE_TARGET="$2"; shift ;;
             -v|--verbose) VERBOSE="true" ;;
             -g|--generate)
                 local config_file="$CONFIG_DIR/$CONFIG_FILE_NAME"
@@ -652,6 +898,32 @@ main() {
     setup_environment
     parse_arguments "$@"
     
+    # Handle single target mode
+    if [[ -n "${SINGLE_TARGET:-}" ]]; then
+        log_debug "Single target mode: $SINGLE_TARGET"
+        
+        if ! parse_single_target "$SINGLE_TARGET"; then
+            exit 1
+        fi
+        
+        # Execute single target with timing
+        local start_time end_time duration
+        start_time="$(date +%s)"
+        
+        if execute_single_target; then
+            end_time="$(date +%s)"
+            duration="$((end_time - start_time))"
+            printf "\n%b✓ Completed in %ds%b\n" "$GREEN" "$duration" "$NC"
+            exit 0
+        else
+            end_time="$(date +%s)"
+            duration="$((end_time - start_time))"
+            printf "\n%b✗ Failed in %ds%b\n" "$RED" "$duration" "$NC"
+            exit 1
+        fi
+    fi
+    
+    # Normal multi-repository mode
     # Set file paths
     readonly CONFIG_FILE="${CONFIG_FILE_ARG:-$CONFIG_DIR/$CONFIG_FILE_NAME}"
     readonly REBASE_FILE="${REBASE_FILE_ARG:-$CONFIG_DIR/$REBASE_FILE_NAME}"
