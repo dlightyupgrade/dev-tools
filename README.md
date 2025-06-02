@@ -4,73 +4,111 @@ A collection of personal development tools and utilities for improving developme
 
 ## Tools
 
-### Local LLM Git Tools
+### Claude Integration Tools
 
-A set of tools that use local LLM (via Ollama) to improve Git workflows without sending code to external services.
+Tools that use Claude AI to enhance Git workflows and development productivity.
 
-- `cli/llm_commit` - Generate meaningful commit messages using a local LLM
-- `cli/llm_pr` - Create high-quality PR descriptions using a local LLM
-- `cli/llm_setup` - Setup script for checking dependencies and downloading models
-- `cli/claude_commit` - Generate commit messages using Claude API
-
-[Read more about the LLM Git Tools](cli/README-llm-git.md)
+- `cli/claude_commit` - Generate meaningful commit messages using Claude API
+- `cli/claude_branch` - Create Git branches using natural language descriptions
 
 ### Repository Management Tools
 
 Tools for managing multiple repositories and streamlining development workflows.
 
 - `cli/update-core-repos.sh` - Update multiple repositories, pulling latest master and rebasing branches
-- `cli/review-prs.sh` - Script for reviewing and managing pull requests
-- `cli/check-maven-versions` - Check and update Maven dependency versions 
+- `cli/review-prs-improved.sh` - Advanced PR review script with markdown reporting
+- `cli/review-prs.sh` - Basic PR review and management script
+- `cli/create-branch.sh` - Create new Git branches with automatic tracking configuration
 
 [Read more about the Repo Updater](cli/README-update-core-repos.md)
+
+### Code Quality and Analysis Tools
+
+Tools for maintaining code quality and analyzing project health.
+
+- `cli/check-maven-versions` - Check Maven dependencies for version updates
+- `cli/check-pr-violations` - Extract and analyze CI violations from GitHub PR comments
+
+### Utility Scripts
+
+Supporting scripts for workflow automation.
+
+- `cli/migrate-tracking-format.sh` - Migrate branch tracking files to enhanced format
 
 ## Installation
 
 1. Clone this repository:
-   ```
+   ```bash
    git clone https://github.com/dlightyupgrade/dev-tools.git personal-dev-tools
    cd personal-dev-tools
    ```
 
-2. Run the setup script for specific tools:
-   ```
-   # For LLM Git Tools
-   cd cli
-   ./llm_setup
-   ```
-
-3. Add tool aliases to your .zshrc/.bashrc (examples):
+2. Add tool aliases to your .zshrc/.bashrc:
    ```bash
-   # PR Status Script
-   alias -g prr="~/code/personal-dev-tools/cli/review-prs.sh"
-   # Local LLM Git Tools
-   alias -g ggc="~/code/personal-dev-tools/cli/llm_commit"
-   alias -g ggpr="~/code/personal-dev-tools/cli/llm_pr"
-   alias -g lsu="~/code/personal-dev-tools/cli/llm_setup"
-   # Maven Dep Version Checker
-   alias -g check-maven-versions="~/code/personal-dev-tools/cli/check-maven-versions"
-   # Repo update script
+   # Repository Management
    alias -g pru="~/code/personal-dev-tools/cli/update-core-repos.sh"
-   # Claude integration
+   alias -g prr="~/code/personal-dev-tools/cli/review-prs-improved.sh"
+   
+   # Claude Integration
    alias -g cc="~/code/personal-dev-tools/cli/claude_commit"
+   alias -g cb="~/code/personal-dev-tools/cli/claude_branch"
+   
+   # Code Quality
+   alias -g ckver="~/code/personal-dev-tools/cli/check-maven-versions"
+   alias -g check-pr-violations="~/code/personal-dev-tools/cli/check-pr-violations"
    ```
 
 ## Requirements
 
-Different tools have different requirements. See the specific tool's README for details.
-
-For the LLM Git Tools:
+### Claude Integration Tools
 - Git
 - Python 3.6+
-- [Ollama](https://ollama.ai/) for local LLM inference
-- GitHub CLI (`gh`) for PR creation
-
-For the Claude integration:
 - Anthropic Claude API key
-- Python 3.6+
-- `anthropic` Python package
+- `anthropic` Python package (`pip install anthropic`)
 
-For the Repository Management Tools:
+### Repository Management Tools
 - Git
 - GitHub CLI (`gh`) for PR management
+- Bash shell
+
+### Code Quality Tools
+- Git
+- GitHub CLI (`gh`) for PR data access
+- Maven (for version checking tools)
+
+## Usage Examples
+
+### Claude Tools
+```bash
+# Generate a commit message with Claude
+cc
+
+# Create a branch using natural language
+cb "create a branch for fixing the login bug"
+```
+
+### Repository Management
+```bash
+# Update all configured repositories
+pru
+
+# Generate PR status report
+prr
+```
+
+### Code Quality
+```bash
+# Check Maven dependency versions
+ckver
+
+# Analyze PR violations with Claude integration
+check-pr-violations 123 --claude
+```
+
+## Configuration
+
+Most tools support configuration files in `~/.config/dev-tools/`. See individual tool documentation for specific configuration options.
+
+## License
+
+MIT
