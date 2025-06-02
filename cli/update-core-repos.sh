@@ -61,7 +61,7 @@ set -euo pipefail
 # CONFIGURATION & CONSTANTS
 #===============================================================
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly VERSION="3.1.2"
+readonly VERSION="4.0.0"
 readonly PROJECTS_DIR="$HOME/code"
 readonly CONFIG_DIR="$HOME/.config/dev-tools"
 readonly CONFIG_FILE_NAME="project-list.txt"
@@ -75,6 +75,12 @@ FORCE_PUSH="true"
 CLEAN_BRANCHES="true"
 FORCE_REBASE="false"
 VERBOSE="false"
+UPDATE_TRACKING_ONLY="false"
+SHOW_CLEANUP_ONLY="false"
+CLEANUP_MODE="false"
+DRY_RUN="false"
+CONFIRM_CLEANUP="false"
+DELETE_LOCAL_BRANCHES="false"
 
 # Colors - initialize early
 if [[ -t 1 ]]; then
@@ -234,11 +240,26 @@ load_branches_for_repo() {
     while IFS= read -r line; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         
-        if [[ "$line" == "$repo_name:"* ]]; then
-            local branch="${line#*:}"
-            is_protected_branch "$branch" || echo "$branch" >> "$result_file"
-        elif [[ "$line" != *":"* ]]; then
-            is_protected_branch "$line" || echo "$line" >> "$result_file"
+        # Handle enhanced format
+        local tracking_data
+        local branch
+        if parse_tracking_line "$line" tracking_data; then
+            branch="${tracking_data[0]}"
+            local repo="${tracking_data[3]}"
+            
+            # Include branch if it matches this repo or is marked as "multiple"
+            if [[ "$repo" == "multiple" || "$repo" == "$repo_name" ]]; then
+                is_protected_branch "$branch" || echo "$branch" >> "$result_file"
+            fi
+        else
+            # Handle legacy format and repo-specific branches
+            if [[ "$line" == "$repo_name:"* ]]; then
+                branch="${line#*:}"
+                is_protected_branch "$branch" || echo "$branch" >> "$result_file"
+            elif [[ "$line" != *":"* && "$line" != *"|"* ]]; then
+                # Simple branch name (legacy format)
+                is_protected_branch "$line" || echo "$line" >> "$result_file"
+            fi
         fi
     done < "$rebase_file"
 }
@@ -290,6 +311,12 @@ parse_single_target() {
         branch_name="${target#*:}"
         log_debug "Parsed repo:branch: repo=$repo_name, branch=$branch_name"
         
+    # Repository-only format (repo-name without colon) - find user branches
+    elif [[ "$target" != *"/"* && "$target" != "."* ]]; then
+        repo_name="$target"
+        branch_name=""  # Will be detected later
+        log_debug "Parsed repo-only: repo=$repo_name (will detect user branches)"
+        
     # Just branch name - detect current repo
     else
         branch_name="$target"
@@ -307,15 +334,28 @@ parse_single_target() {
         fi
     fi
     
-    # Validate we have both parts
-    if [[ -z "$repo_name" || -z "$branch_name" ]]; then
+    # Validate we have at least repo name
+    if [[ -z "$repo_name" ]]; then
         log_error "Failed to parse target: $target"
-        log_error "Use format: repo:branch, branch-name (in repo), or GitHub PR URL"
+        log_error "Use format: repo:branch, repo-name, branch-name (in repo), or GitHub URL"
         return 1
     fi
     
     # Find the repository path
-    local repo_path="$PROJECTS_DIR/$repo_name"
+    local repo_path
+    if [[ "$repo_name" == "." ]]; then
+        # Current directory mode
+        if git rev-parse --git-dir >/dev/null 2>&1; then
+            repo_path="$(git rev-parse --show-toplevel 2>/dev/null)"
+            repo_name="$(basename "$repo_path" 2>/dev/null)"
+        else
+            log_error "Current directory is not a git repository"
+            return 1
+        fi
+    else
+        repo_path="$PROJECTS_DIR/$repo_name"
+    fi
+    
     if [[ ! -d "$repo_path" ]]; then
         log_error "Repository not found: $repo_path"
         return 1
@@ -329,6 +369,504 @@ parse_single_target() {
     # Export for use by main processing
     SINGLE_REPO_PATH="$repo_path"
     SINGLE_BRANCH_NAME="$branch_name"
+    
+    return 0
+}
+
+# Detect user branches in a repository (branches that likely belong to the user)
+detect_user_branches() {
+    local repo_path="$1"
+    local result_file="$2"
+    
+    cd "$repo_path" || return 1
+    
+    # Clear result file
+    > "$result_file"
+    
+    # Get all local branches except protected ones
+    local branches
+    branches="$(git branch --format='%(refname:short)' 2>/dev/null | grep -v "^$BASE_BRANCH$" | grep -v "^main$" || echo "")"
+    
+    if [[ -z "$branches" ]]; then
+        log_debug "No user branches found in $(basename "$repo_path")"
+        return 0
+    fi
+    
+    # Filter out remote tracking branches that aren't local feature branches
+    while IFS= read -r branch; do
+        [[ -z "$branch" ]] && continue
+        
+        # Skip protected branches
+        is_protected_branch "$branch" && continue
+        
+        # Include the branch if it has local commits or matches common patterns
+        local has_local_commits
+        has_local_commits="$(git rev-list --count "$branch" --not origin/"$BASE_BRANCH" 2>/dev/null || echo "0")"
+        
+        # Include if it has local commits, or matches user branch patterns
+        if [[ "$has_local_commits" -gt 0 ]] || \
+           [[ "$branch" =~ ^(feature|fix|hotfix|bugfix|chore|refactor|nojira|SI-|JIRA-) ]]; then
+            echo "$branch" >> "$result_file"
+            log_debug "Added user branch: $branch"
+        fi
+    done <<< "$branches"
+    
+    return 0
+}
+
+#===============================================================
+# ENHANCED TRACKING FUNCTIONS
+#===============================================================
+# Parse enhanced tracking file format
+parse_tracking_line() {
+    local line="$1"
+    local result_var="$2"
+    
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && return 1
+    
+    # Check if it's enhanced format (contains pipes)
+    if [[ "$line" == *"|"* ]]; then
+        # Enhanced format: branch|pr_url|status|repo|date|notes
+        IFS='|' read -r branch pr_url status repo date notes <<< "$line"
+        eval "$result_var=(\"$branch\" \"$pr_url\" \"$status\" \"$repo\" \"$date\" \"$notes\")"
+    else
+        # Legacy format: just branch name
+        local branch="$line"
+        branch="${branch#"${branch%%[![:space:]]*}"}"  # ltrim
+        branch="${branch%"${branch##*[![:space:]]}"}"  # rtrim
+        eval "$result_var=(\"$branch\" \"auto\" \"unknown\" \"multiple\" \"$(date +%Y-%m-%d)\" \"LEGACY\")"
+    fi
+    
+    return 0
+}
+
+# Check PR status for a branch
+check_branch_pr_status() {
+    local repo_path="$1"
+    local branch="$2"
+    local repo_name="$(basename "$repo_path")"
+    
+    cd "$repo_path" || return 1
+    
+    # Check if branch exists locally
+    if ! git show-ref --verify --quiet refs/heads/"$branch" 2>/dev/null; then
+        echo "not_found"
+        return 0
+    fi
+    
+    # Check if branch is merged into master (using merge-base)
+    local merge_base
+    merge_base="$(git merge-base "$branch" "$BASE_BRANCH" 2>/dev/null || echo "")"
+    local master_hash
+    master_hash="$(git rev-parse "$BASE_BRANCH" 2>/dev/null || echo "")"
+    
+    if [[ -n "$merge_base" && -n "$master_hash" && "$merge_base" == "$master_hash" ]]; then
+        # Branch is behind or at master - check if it has unique commits
+        local branch_hash
+        branch_hash="$(git rev-parse "$branch" 2>/dev/null || echo "")"
+        if [[ "$branch_hash" == "$master_hash" ]]; then
+            echo "merged_exact"
+            return 0
+        fi
+        
+        # Check if all branch commits are in master
+        local unique_commits
+        unique_commits="$(git rev-list "$branch" --not "$BASE_BRANCH" 2>/dev/null | wc -l)"
+        if [[ "$unique_commits" -eq 0 ]]; then
+            echo "merged"
+            return 0
+        fi
+    fi
+    
+    # Check for open PR using gh CLI
+    if command -v gh >/dev/null 2>&1; then
+        # Try to get PR info for this branch
+        local pr_info
+        pr_info="$(gh pr list --head "$branch" --json state,url --jq '.[0] | "\(.state)|\(.url)"' 2>/dev/null || echo "")"
+        
+        if [[ -n "$pr_info" && "$pr_info" != "null|null" ]]; then
+            local pr_state="${pr_info%|*}"
+            case "$pr_state" in
+                OPEN|open) echo "open_pr"; return 0 ;;
+                MERGED|merged) echo "merged_pr"; return 0 ;;
+                CLOSED|closed) echo "closed_pr"; return 0 ;;
+                DRAFT|draft) echo "draft_pr"; return 0 ;;
+            esac
+        fi
+        
+        # Check for merged PRs by searching commit history
+        local recent_commits
+        recent_commits="$(git log --oneline -10 "$BASE_BRANCH" --grep="$branch" 2>/dev/null || echo "")"
+        if [[ -n "$recent_commits" ]]; then
+            echo "merged_pr"
+            return 0
+        fi
+    fi
+    
+    echo "active"
+    return 0
+}
+
+# Auto-detect PR URL for a branch
+detect_pr_url() {
+    local repo_path="$1"
+    local branch="$2"
+    
+    cd "$repo_path" || return 1
+    
+    if command -v gh >/dev/null 2>&1; then
+        # Get PR URL if it exists
+        local pr_url
+        pr_url="$(gh pr list --head "$branch" --json url --jq '.[0].url' 2>/dev/null || echo "")"
+        
+        if [[ -n "$pr_url" && "$pr_url" != "null" ]]; then
+            echo "$pr_url"
+            return 0
+        fi
+        
+        # Search in recently closed/merged PRs
+        pr_url="$(gh search prs --repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" "$branch" --state=closed --json url --jq '.[0].url' 2>/dev/null || echo "")"
+        
+        if [[ -n "$pr_url" && "$pr_url" != "null" ]]; then
+            echo "$pr_url"
+            return 0
+        fi
+    fi
+    
+    echo "auto"
+    return 0
+}
+
+# Update tracking file with current branch status
+update_branch_tracking() {
+    local tracking_file="$1"
+    local repo_path="${2:-}"
+    local single_branch="${3:-}"
+    
+    [[ ! -f "$tracking_file" ]] && return 0
+    
+    local temp_file="${tracking_file}.update.$$"
+    local updated_count=0
+    
+    # Process each line in tracking file
+    while IFS= read -r line; do
+        # Copy comments and empty lines as-is
+        if [[ -z "$line" || "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+            echo "$line" >> "$temp_file"
+            continue
+        fi
+        
+        # Parse the line
+        local tracking_data
+        if ! parse_tracking_line "$line" tracking_data; then
+            echo "$line" >> "$temp_file"
+            continue
+        fi
+        
+        local branch="${tracking_data[0]}"
+        local pr_url="${tracking_data[1]}"
+        local status="${tracking_data[2]}"
+        local repo="${tracking_data[3]}"
+        local date="${tracking_data[4]}"
+        local notes="${tracking_data[5]}"
+        
+        # Skip if processing single branch and this isn't it
+        if [[ -n "$single_branch" && "$branch" != "$single_branch" ]]; then
+            echo "$line" >> "$temp_file"
+            continue
+        fi
+        
+        # Update status by checking repositories
+        local new_status="unknown"
+        local new_pr_url="$pr_url"
+        local new_notes="$notes"
+        
+        # Check status across repositories
+        if [[ -n "$repo_path" ]]; then
+            # Single repository mode
+            new_status="$(check_branch_pr_status "$repo_path" "$branch")"
+            [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_path" "$branch")"
+        else
+            # Multi-repository mode
+            for repo_dir in "${REPOS[@]}"; do
+                local repo_status
+                repo_status="$(check_branch_pr_status "$repo_dir" "$branch")"
+                
+                # Priority: merged > open_pr > active > not_found
+                case "$repo_status" in
+                    merged*|merged_pr)
+                        new_status="merged"
+                        [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_dir" "$branch")"
+                        break ;;
+                    open_pr|draft_pr)
+                        [[ "$new_status" != "merged" ]] && new_status="open"
+                        [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_dir" "$branch")"
+                        ;;
+                    closed_pr)
+                        [[ "$new_status" != "merged" && "$new_status" != "open" ]] && new_status="closed"
+                        [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_dir" "$branch")"
+                        ;;
+                    active)
+                        [[ "$new_status" == "unknown" ]] && new_status="active"
+                        ;;
+                esac
+            done
+        fi
+        
+        # Add cleanup marker for merged branches
+        if [[ "$new_status" == "merged" && "$status" != "merged" ]]; then
+            if [[ "$notes" != *"CLEANUP_NEEDED"* ]]; then
+                new_notes="${notes:+$notes,}CLEANUP_NEEDED"
+            fi
+        fi
+        
+        # Write updated line
+        echo "$branch|$new_pr_url|$new_status|$repo|$date|$new_notes" >> "$temp_file"
+        
+        # Track if we actually updated something
+        if [[ "$new_status" != "$status" || "$new_pr_url" != "$pr_url" || "$new_notes" != "$notes" ]]; then
+            ((updated_count++))
+        fi
+        
+    done < "$tracking_file"
+    
+    # Replace original file
+    mv "$temp_file" "$tracking_file"
+    
+    [[ "$VERBOSE" == "true" ]] && log_info "Updated tracking info for $updated_count branches"
+    
+    return 0
+}
+
+# Show branches marked for cleanup
+show_cleanup_candidates() {
+    local tracking_file="$1"
+    local filter_branch="${2:-}"
+    
+    [[ ! -f "$tracking_file" ]] && {
+        log_error "Tracking file not found: $tracking_file"
+        return 1
+    }
+    
+    local cleanup_count=0
+    local merged_count=0
+    
+    printf "%bBranches marked for cleanup:%b\n" "$BOLD" "$NC"
+    
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Parse the line
+        local tracking_data
+        if ! parse_tracking_line "$line" tracking_data; then
+            continue
+        fi
+        
+        local branch="${tracking_data[0]}"
+        local pr_url="${tracking_data[1]}"
+        local status="${tracking_data[2]}"
+        local repo="${tracking_data[3]}"
+        local date="${tracking_data[4]}"
+        local notes="${tracking_data[5]}"
+        
+        # Skip if filtering for specific branch and this isn't it
+        if [[ -n "$filter_branch" && "$branch" != "$filter_branch" ]]; then
+            continue
+        fi
+        
+        # Check if marked for cleanup or merged
+        if [[ "$notes" == *"CLEANUP_NEEDED"* || "$status" == "merged" ]]; then
+            ((cleanup_count++))
+            
+            printf "  %b%s%b" "$YELLOW" "$branch" "$NC"
+            [[ "$status" == "merged" ]] && printf " (%bmerged%b)" "$GREEN" "$NC" && ((merged_count++))
+            [[ "$notes" == *"CLEANUP_NEEDED"* ]] && printf " (%bcleanup needed%b)" "$RED" "$NC"
+            
+            if [[ "$pr_url" != "auto" && "$pr_url" != "none" ]]; then
+                printf " - %s" "$pr_url"
+            fi
+            echo
+        fi
+    done < "$tracking_file"
+    
+    if [[ $cleanup_count -eq 0 ]]; then
+        log_info "No branches need cleanup"
+    else
+        echo
+        printf "%bSummary:%b %d branches need cleanup (%d merged)\n" "$BOLD" "$NC" "$cleanup_count" "$merged_count"
+        printf "Use %s--cleanup --dry-run%s to see what would be deleted\n" "$BOLD" "$NC"
+        printf "Use %s--cleanup --confirm%s to perform actual cleanup\n" "$BOLD" "$NC"
+    fi
+    
+    return 0
+}
+
+# Perform branch cleanup
+cleanup_merged_branches() {
+    local tracking_file="$1"
+    local dry_run="${2:-false}"
+    local confirm="${3:-false}"
+    local filter_branch="${4:-}"
+    local delete_local="${5:-false}"
+    
+    [[ ! -f "$tracking_file" ]] && {
+        log_error "Tracking file not found: $tracking_file"
+        return 1
+    }
+    
+    # Safety check for destructive operations
+    if [[ "$dry_run" == "false" && "$confirm" == "false" ]]; then
+        log_error "Cleanup requires either --dry-run or --confirm flag for safety"
+        log_error "Use --cleanup --dry-run to preview changes"
+        log_error "Use --cleanup --confirm to perform actual cleanup"
+        return 1
+    fi
+    
+    local deleted_count=0
+    local failed_count=0
+    local temp_file="${tracking_file}.cleanup.$$"
+    
+    if [[ "$dry_run" == "true" ]]; then
+        log_info "DRY RUN: Would perform the following cleanup actions:"
+        echo
+    else
+        log_info "Performing branch cleanup..."
+        echo
+    fi
+    
+    # Process tracking file
+    while IFS= read -r line; do
+        # Copy comments and empty lines as-is to temp file
+        if [[ -z "$line" || "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+            [[ "$dry_run" == "false" ]] && echo "$line" >> "$temp_file"
+            continue
+        fi
+        
+        # Parse the line
+        local tracking_data
+        if ! parse_tracking_line "$line" tracking_data; then
+            [[ "$dry_run" == "false" ]] && echo "$line" >> "$temp_file"
+            continue
+        fi
+        
+        local branch="${tracking_data[0]}"
+        local pr_url="${tracking_data[1]}"
+        local status="${tracking_data[2]}"
+        local repo="${tracking_data[3]}"
+        local date="${tracking_data[4]}"
+        local notes="${tracking_data[5]}"
+        
+        # Skip if filtering for specific branch and this isn't it
+        if [[ -n "$filter_branch" && "$branch" != "$filter_branch" ]]; then
+            [[ "$dry_run" == "false" ]] && echo "$line" >> "$temp_file"
+            continue
+        fi
+        
+        # Check if should be cleaned up
+        local should_cleanup="false"
+        if [[ "$notes" == *"CLEANUP_NEEDED"* || "$status" == "merged" ]]; then
+            should_cleanup="true"
+        fi
+        
+        if [[ "$should_cleanup" == "true" ]]; then
+            local cleanup_success="true"
+            
+            if [[ "$dry_run" == "true" ]]; then
+                printf "Would delete branch: %b%s%b" "$YELLOW" "$branch" "$NC"
+                [[ "$pr_url" != "auto" && "$pr_url" != "none" ]] && printf " (PR: %s)" "$pr_url"
+                echo
+                
+                # Check which repos contain this branch
+                for repo_path in "${REPOS[@]}"; do
+                    local repo_name="$(basename "$repo_path")"
+                    cd "$repo_path" || continue
+                    
+                    if git show-ref --verify --quiet refs/heads/"$branch" 2>/dev/null; then
+                        if [[ "$delete_local" == "true" ]]; then
+                            printf "  - Would delete local branch from %s\n" "$repo_name"
+                        else
+                            printf "  - Would skip local branch in %s (use --delete-local to remove)\n" "$repo_name"
+                        fi
+                        
+                        # Check if remote branch exists
+                        if git ls-remote --heads origin "$branch" 2>/dev/null | grep -q "$branch"; then
+                            printf "  - Would delete remote branch from %s\n" "$repo_name"
+                        fi
+                    fi
+                done
+                echo
+            else
+                printf "Deleting branch: %b%s%b" "$YELLOW" "$branch" "$NC"
+                [[ "$pr_url" != "auto" && "$pr_url" != "none" ]] && printf " (PR: %s)" "$pr_url"
+                echo
+                
+                # Delete from all repositories
+                for repo_path in "${REPOS[@]}"; do
+                    local repo_name="$(basename "$repo_path")"
+                    cd "$repo_path" || continue
+                    
+                    if git show-ref --verify --quiet refs/heads/"$branch" 2>/dev/null; then
+                        # Only delete local branches if explicitly allowed
+                        if [[ "$delete_local" == "true" ]]; then
+                            printf "  Deleting local branch from %s..." "$repo_name"
+                            
+                            # Try graceful delete first (branch is merged)
+                            if git branch -d "$branch" 2>/dev/null; then
+                                printf " %b✓%b\n" "$GREEN" "$NC"
+                            elif git branch -D "$branch" 2>/dev/null; then
+                                printf " %b✓%b (forced)\n" "$YELLOW" "$NC"
+                            else
+                                printf " %b✗%b (failed)\n" "$RED" "$NC"
+                                cleanup_success="false"
+                            fi
+                        else
+                            printf "  Skipping local branch in %s (use --delete-local to remove)\n" "$repo_name"
+                        fi
+                        
+                        # Always try to delete remote branch if it exists
+                        if git ls-remote --heads origin "$branch" 2>/dev/null | grep -q "$branch"; then
+                            printf "  Deleting remote from %s..." "$repo_name"
+                            if git push origin --delete "$branch" 2>/dev/null; then
+                                printf " %b✓%b\n" "$GREEN" "$NC"
+                            else
+                                printf " %b✗%b (failed)\n" "$RED" "$NC"
+                            fi
+                        fi
+                    fi
+                done
+            fi
+            
+            if [[ "$cleanup_success" == "true" ]]; then
+                ((deleted_count++))
+                # Don't add to temp file (remove from tracking)
+            else
+                ((failed_count++))
+                # Keep in tracking file if cleanup failed
+                [[ "$dry_run" == "false" ]] && echo "$line" >> "$temp_file"
+            fi
+        else
+            # Keep branches that don't need cleanup
+            [[ "$dry_run" == "false" ]] && echo "$line" >> "$temp_file"
+        fi
+        
+    done < "$tracking_file"
+    
+    # Update tracking file if not dry run
+    if [[ "$dry_run" == "false" ]]; then
+        mv "$temp_file" "$tracking_file"
+    fi
+    
+    # Show summary
+    echo
+    if [[ "$dry_run" == "true" ]]; then
+        log_info "DRY RUN Summary: Would delete $deleted_count branches"
+        [[ $failed_count -gt 0 ]] && log_warn "Would fail to delete $failed_count branches"
+    else
+        log_info "Cleanup Summary: Deleted $deleted_count branches"
+        [[ $failed_count -gt 0 ]] && log_warn "Failed to delete $failed_count branches"
+    fi
     
     return 0
 }
@@ -659,15 +1197,57 @@ execute_single_target() {
     local branch_name="$SINGLE_BRANCH_NAME"
     local repo_name="$(basename "$repo_path")"
     
-    printf "Processing single target: %b%s%b:%b%s%b\n\n" "$BOLD" "$repo_name" "$NC" "$BOLD" "$branch_name" "$NC"
-    
-    # Create temp branches file with just our target branch
-    local work_dir="$TEMP_DIR/$repo_name"
-    mkdir -p "$work_dir"
-    echo "$branch_name" > "$work_dir/branches"
+    # Handle repository-only mode (find user branches)
+    if [[ -z "$branch_name" ]]; then
+        printf "Processing repository: %b%s%b (finding user branches)\n\n" "$BOLD" "$repo_name" "$NC"
+        
+        local work_dir="$TEMP_DIR/$repo_name"
+        mkdir -p "$work_dir"
+        local branches_file="$work_dir/branches"
+        
+        # Detect user branches in the repository
+        if ! detect_user_branches "$repo_path" "$branches_file"; then
+            log_error "Failed to detect user branches in $repo_name"
+            return 1
+        fi
+        
+        local branch_count
+        branch_count="$(wc -l < "$branches_file" 2>/dev/null || echo "0")"
+        
+        if [[ "$branch_count" -eq 0 ]]; then
+            log_info "No user branches found in $repo_name"
+            return 0
+        fi
+        
+        printf "Found %d user branch(es) to process:\n" "$branch_count"
+        while IFS= read -r branch; do
+            [[ -n "$branch" ]] && printf "  • %s\n" "$branch"
+        done < "$branches_file"
+        echo
+        
+    else
+        printf "Processing single target: %b%s%b:%b%s%b\n\n" "$BOLD" "$repo_name" "$NC" "$BOLD" "$branch_name" "$NC"
+        
+        # Create temp branches file with just our target branch
+        local work_dir="$TEMP_DIR/$repo_name"
+        mkdir -p "$work_dir"
+        echo "$branch_name" > "$work_dir/branches"
+    fi
     
     local state_file="$work_dir/state"
     local result_file="$work_dir/result"
+    
+    # Update tracking information for the repository before processing
+    [[ "$VERBOSE" == "true" ]] && log_info "Updating branch tracking for $repo_name..."
+    if [[ -n "$branch_name" ]]; then
+        # Single branch mode
+        update_branch_tracking "$REBASE_FILE" "$repo_path" "$branch_name"
+    else
+        # Repository mode - update all branches in the branches file
+        while IFS= read -r branch; do
+            [[ -n "$branch" ]] && update_branch_tracking "$REBASE_FILE" "$repo_path" "$branch"
+        done < "$work_dir/branches"
+    fi
     
     # Process the single repository
     show_repo_progress 1 1 "$repo_name"
@@ -682,6 +1262,18 @@ execute_single_target() {
             printf "\n%bResult:%b " "$BOLD" "$NC"
             format_result "$result"
         fi
+        
+        # Show tracking summary for processed branches
+        echo
+        printf "%bTracking Summary:%b\n" "$BOLD" "$NC"
+        if [[ -n "$branch_name" ]]; then
+            show_branch_tracking_summary "$REBASE_FILE" "$branch_name"
+        else
+            while IFS= read -r branch; do
+                [[ -n "$branch" ]] && show_branch_tracking_summary "$REBASE_FILE" "$branch"
+            done < "$work_dir/branches"
+        fi
+        
         return 0
     else
         printf "  %b✗%b Failed\n" "$RED" "$NC"
@@ -695,6 +1287,46 @@ execute_single_target() {
         fi
         return 1
     fi
+}
+
+# Show tracking summary for a specific branch
+show_branch_tracking_summary() {
+    local tracking_file="$1"
+    local branch="$2"
+    
+    [[ ! -f "$tracking_file" ]] && return 0
+    
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        local tracking_data
+        if ! parse_tracking_line "$line" tracking_data; then
+            continue
+        fi
+        
+        local track_branch="${tracking_data[0]}"
+        local pr_url="${tracking_data[1]}"
+        local status="${tracking_data[2]}"
+        local notes="${tracking_data[5]}"
+        
+        if [[ "$track_branch" == "$branch" ]]; then
+            printf "  %b%s%b: " "$BOLD" "$branch" "$NC"
+            
+            case "$status" in
+                open) printf "%bopen PR%b" "$GREEN" "$NC" ;;
+                merged) printf "%bmerged%b" "$YELLOW" "$NC" ;;
+                closed) printf "%bclosed PR%b" "$RED" "$NC" ;;
+                draft) printf "%bdraft PR%b" "$BLUE" "$NC" ;;
+                active) printf "%bactive%b" "$GREEN" "$NC" ;;
+                *) printf "%b%s%b" "$YELLOW" "$status" "$NC" ;;
+            esac
+            
+            [[ "$pr_url" != "auto" && "$pr_url" != "none" ]] && printf " (%s)" "${pr_url#https://github.com/*/}"
+            [[ "$notes" == *"CLEANUP_NEEDED"* ]] && printf " %b[cleanup needed]%b" "$RED" "$NC"
+            echo
+            break
+        fi
+    done < "$tracking_file"
 }
 
 execute_repositories() {
@@ -802,6 +1434,12 @@ OPTIONS:
     -s, --single TARGET Process only one branch or PR (see formats below)
     -v, --verbose       Enable verbose output with debug information
     -g, --generate      Generate example configuration files and exit
+    --update-tracking   Update branch/PR status in tracking file without rebasing
+    --show-cleanup      Display branches marked for cleanup
+    --cleanup           Perform branch cleanup (use with --dry-run or --confirm)
+    --dry-run           Show what cleanup would do without making changes
+    --confirm           Confirm destructive operations (required for cleanup)
+    --delete-local      Allow deletion of local branches during cleanup
     -h, --help          Show this help message
     --version           Show version information
 
@@ -809,7 +1447,9 @@ SINGLE TARGET FORMATS:
     GitHub branch URL:  https://github.com/org/repo-name/tree/branch-name
     GitHub PR URL:      https://github.com/org/repo-name/pull/123 (extracts branch)
     repo:branch:        my-repo-name:feature-branch  
+    repo only:          my-repo-name (finds all user branches in repo)
     branch only:        feature-branch (when run from repo directory)
+    current dir:        . (process user branches in current repository)
 
 CONFIGURATION:
     Config file format: One repository path per line
@@ -824,6 +1464,20 @@ EXAMPLES:
     update-core-repos.sh -s repo:branch    # Rebase specific repo:branch
     update-core-repos.sh -s https://github.com/org/repo/tree/branch  # Rebase branch URL
     update-core-repos.sh -s https://github.com/org/repo/pull/123     # Rebase PR branch
+    
+    # Branch and PR tracking commands:
+    update-core-repos.sh --update-tracking  # Update branch/PR status
+    update-core-repos.sh --show-cleanup     # Show branches marked for cleanup
+    update-core-repos.sh --cleanup --dry-run # Preview branch cleanup
+    update-core-repos.sh --cleanup --confirm # Perform branch cleanup (remote only)
+    update-core-repos.sh --cleanup --confirm --delete-local # Full cleanup including local branches
+    
+    # Single target examples:
+    update-core-repos.sh -s my-repo         # Process all user branches in repo
+    update-core-repos.sh -s .               # Process user branches in current repo
+    update-core-repos.sh -s my-repo:branch  # Process specific branch
+    update-core-repos.sh -s my-repo --update-tracking  # Update tracking for repo branches
+    update-core-repos.sh -s branch --show-cleanup      # Show cleanup for single branch
 
 EOF
 }
@@ -841,6 +1495,12 @@ parse_arguments() {
                 [[ -z "${2:-}" ]] && { log_error "Option $1 requires an argument"; exit 1; }
                 SINGLE_TARGET="$2"; shift ;;
             -v|--verbose) VERBOSE="true" ;;
+            --update-tracking) UPDATE_TRACKING_ONLY="true" ;;
+            --show-cleanup) SHOW_CLEANUP_ONLY="true" ;;
+            --cleanup) CLEANUP_MODE="true" ;;
+            --dry-run) DRY_RUN="true" ;;
+            --confirm) CONFIRM_CLEANUP="true" ;;
+            --delete-local) DELETE_LOCAL_BRANCHES="true" ;;
             -g|--generate)
                 local config_file="$CONFIG_DIR/$CONFIG_FILE_NAME"
                 local rebase_file="$CONFIG_DIR/$REBASE_FILE_NAME"
@@ -898,6 +1558,68 @@ main() {
     setup_environment
     parse_arguments "$@"
     
+    # Set file paths early for special modes
+    readonly CONFIG_FILE="${CONFIG_FILE_ARG:-$CONFIG_DIR/$CONFIG_FILE_NAME}"
+    readonly REBASE_FILE="${REBASE_FILE_ARG:-$CONFIG_DIR/$REBASE_FILE_NAME}"
+    
+    # Handle special modes first
+    if [[ "$UPDATE_TRACKING_ONLY" == "true" ]]; then
+        log_debug "Update tracking mode only"
+        
+        # Handle single target mode for tracking updates
+        if [[ -n "${SINGLE_TARGET:-}" ]]; then
+            if ! parse_single_target "$SINGLE_TARGET"; then
+                exit 1
+            fi
+            log_info "Updating tracking for single target: $(basename "$SINGLE_REPO_PATH"):$SINGLE_BRANCH_NAME"
+            update_branch_tracking "$REBASE_FILE" "$SINGLE_REPO_PATH" "$SINGLE_BRANCH_NAME"
+        else
+            if ! load_repositories "$CONFIG_FILE"; then
+                log_error "Failed to load repositories from configuration"
+                exit 1
+            fi
+            log_info "Updating branch tracking information..."
+            update_branch_tracking "$REBASE_FILE"
+        fi
+        log_info "Tracking update completed"
+        exit 0
+    fi
+    
+    if [[ "$SHOW_CLEANUP_ONLY" == "true" ]]; then
+        log_debug "Show cleanup mode only"
+        
+        # Handle single branch filtering for cleanup display
+        if [[ -n "${SINGLE_TARGET:-}" ]]; then
+            if ! parse_single_target "$SINGLE_TARGET"; then
+                exit 1
+            fi
+            show_cleanup_candidates "$REBASE_FILE" "$SINGLE_BRANCH_NAME"
+        else
+            show_cleanup_candidates "$REBASE_FILE"
+        fi
+        exit 0
+    fi
+    
+    if [[ "$CLEANUP_MODE" == "true" ]]; then
+        log_debug "Cleanup mode"
+        
+        # Handle single target mode for cleanup
+        if [[ -n "${SINGLE_TARGET:-}" ]]; then
+            if ! parse_single_target "$SINGLE_TARGET"; then
+                exit 1
+            fi
+            # Single target cleanup - only affect the specified branch
+            cleanup_merged_branches "$REBASE_FILE" "$DRY_RUN" "$CONFIRM_CLEANUP" "$SINGLE_BRANCH_NAME" "$DELETE_LOCAL_BRANCHES"
+        else
+            if ! load_repositories "$CONFIG_FILE"; then
+                log_error "Failed to load repositories from configuration"
+                exit 1
+            fi
+            cleanup_merged_branches "$REBASE_FILE" "$DRY_RUN" "$CONFIRM_CLEANUP" "" "$DELETE_LOCAL_BRANCHES"
+        fi
+        exit $?
+    fi
+    
     # Handle single target mode
     if [[ -n "${SINGLE_TARGET:-}" ]]; then
         log_debug "Single target mode: $SINGLE_TARGET"
@@ -924,9 +1646,6 @@ main() {
     fi
     
     # Normal multi-repository mode
-    # Set file paths
-    readonly CONFIG_FILE="${CONFIG_FILE_ARG:-$CONFIG_DIR/$CONFIG_FILE_NAME}"
-    readonly REBASE_FILE="${REBASE_FILE_ARG:-$CONFIG_DIR/$REBASE_FILE_NAME}"
     
     log_debug "Using config file: $CONFIG_FILE"
     log_debug "Using rebase file: $REBASE_FILE"
@@ -940,6 +1659,10 @@ main() {
     # Execute repository updates with timing
     local start_time end_time duration
     start_time="$(date +%s)"
+    
+    # Update tracking information before processing
+    [[ "$VERBOSE" == "true" ]] && log_info "Updating branch tracking information..."
+    update_branch_tracking "$REBASE_FILE"
     
     execute_repositories
     
