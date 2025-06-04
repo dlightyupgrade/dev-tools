@@ -1,0 +1,233 @@
+#!/bin/bash
+
+# deployment-diff-claude - Extract deployment diff data for Claude processing
+# Usage: deployment-diff-claude <PR_URL>
+# Purpose: Designed for Claude to process deployment diffs and generate Slack approval messages
+#
+# CLAUDE WORKFLOW INTEGRATION:
+# This script is designed to be used with Claude Code in a deployment approval workflow.
+# When a user says trigger phrases like:
+#   - "get pr approval for <URL>"
+#   - "deployment approval for <URL>" 
+#   - "generate deployment approval <URL>"
+#   - "create deployment message for <URL>"
+#   - "slack approval for <URL>"
+#
+# Claude should:
+# 1. Extract the PR URL from user input
+# 2. Run: deployment-diff-claude <PR_URL>
+# 3. Process the script output following the embedded instructions
+# 4. Generate a clean Slack approval message
+#
+# This follows the same pattern as other Claude tools like 'prr' and 'prc'.
+
+set -euo pipefail
+
+# Check if help is requested or no arguments provided
+if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "deployment-diff-claude - Extract deployment diff data for Claude processing"
+    echo ""
+    echo "Usage: deployment-diff-claude <PR_URL>"
+    echo "Example: deployment-diff-claude <PR_URL>"
+    echo ""
+    echo "CLAUDE WORKFLOW INTEGRATION:"
+    echo "This script is designed for Claude Code deployment approval workflows."
+    echo ""
+    echo "Trigger phrases for Claude:"
+    echo "  - 'get pr approval for <URL>'"
+    echo "  - 'deployment approval for <URL>'"
+    echo "  - 'generate deployment approval <URL>'"
+    echo "  - 'create deployment message for <URL>'"
+    echo "  - 'slack approval for <URL>'"
+    echo ""
+    echo "Claude workflow steps:"
+    echo "  1. Extract PR URL from user input"
+    echo "  2. Run: deployment-diff-claude <PR_URL>"
+    echo "  3. Process output following embedded instructions"
+    echo "  4. Generate clean Slack approval message"
+    echo ""
+    echo "Output: Structured data + parsing instructions for Claude"
+    echo "Setup: Run with --help to see Claude context file integration"
+    echo "Pattern: Follows same approach as 'prr' and 'prc' tools"
+    exit 0
+fi
+
+PR_URL="$1"
+
+# Extract repo and PR number from URL
+if [[ "$PR_URL" =~ https://github.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+    REPO_OWNER="${BASH_REMATCH[1]}"
+    REPO_NAME="${BASH_REMATCH[2]}"
+    PR_NUMBER="${BASH_REMATCH[3]}"
+else
+    echo "Error: Invalid PR URL format. Expected: https://github.com/owner/repo/pull/number"
+    exit 1
+fi
+
+echo "=== DEPLOYMENT DIFF ANALYSIS FOR CLAUDE ==="
+echo "PR: $PR_URL"
+echo "Repository: $REPO_OWNER/$REPO_NAME"
+echo "PR Number: $PR_NUMBER"
+echo ""
+
+# Get PR information
+echo "--- PR INFORMATION ---"
+PR_DATA=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER")
+PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
+PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
+PR_AUTHOR=$(echo "$PR_DATA" | jq -r '.user.login')
+
+echo "Title: $PR_TITLE"
+echo "State: $PR_STATE" 
+echo "Author: $PR_AUTHOR"
+
+# Extract service name from PR title
+if [[ "$PR_TITLE" =~ Deploy\ of\ ([a-zA-Z0-9-]+) ]]; then
+    SERVICE_NAME="${BASH_REMATCH[1]}"
+    echo "Service: $SERVICE_NAME"
+else
+    echo "Service: Could not extract from title"
+fi
+echo ""
+
+# Get the commit SHA for the PR
+COMMIT_SHA=$(echo "$PR_DATA" | jq -r '.head.sha')
+
+# Get all check runs for this commit
+echo "--- SEARCHING FOR DEPLOYMENT DIFF CHECK ---"
+CHECK_RUNS=$(gh api "repos/$REPO_OWNER/$REPO_NAME/commits/$COMMIT_SHA/check-runs")
+
+# Find the Deployment Diff check run
+DEPLOYMENT_DIFF_CHECK=$(echo "$CHECK_RUNS" | jq -r '.check_runs[] | select(.name == "Deployment Diff") | .id')
+
+if [ -z "$DEPLOYMENT_DIFF_CHECK" ]; then
+    echo "Error: Could not find Deployment Diff check run for commit $COMMIT_SHA"
+    echo ""
+    echo "Available check runs:"
+    echo "$CHECK_RUNS" | jq -r '.check_runs[] | "- " + .name + " (ID: " + (.id | tostring) + ")"'
+    exit 1
+fi
+
+echo "Found Deployment Diff check run ID: $DEPLOYMENT_DIFF_CHECK"
+echo ""
+
+# Get the deployment diff data
+echo "--- RAW DEPLOYMENT DIFF DATA ---"
+DIFF_DATA=$(gh api "repos/$REPO_OWNER/$REPO_NAME/check-runs/$DEPLOYMENT_DIFF_CHECK")
+DIFF_TEXT=$(echo "$DIFF_DATA" | jq -r '.output.text')
+
+echo "Check Run Status: $(echo "$DIFF_DATA" | jq -r '.status')"
+echo "Check Run Conclusion: $(echo "$DIFF_DATA" | jq -r '.conclusion')"
+echo ""
+
+# Extract version information
+VERSION_LINE=$(echo "$DIFF_TEXT" | grep -E '\[.*\.\.\.' | head -1)
+if [[ "$VERSION_LINE" =~ \[([a-zA-Z0-9-]+)\.\.\.([a-zA-Z0-9-]+) ]]; then
+    OLD_VERSION="${BASH_REMATCH[1]}"
+    NEW_VERSION="${BASH_REMATCH[2]}"
+    echo "Version Change: $OLD_VERSION → $NEW_VERSION"
+else
+    echo "Version Change: Could not extract"
+fi
+echo ""
+
+# Output the raw deployment diff text
+echo "--- RAW DEPLOYMENT DIFF TABLE ---"
+echo "$DIFF_TEXT"
+echo ""
+
+# Additional context for Claude
+echo "--- CLAUDE PROCESSING INSTRUCTIONS ---"
+cat << 'EOF'
+Based on the deployment diff data above, please create a Slack message for production deployment approval with the following requirements:
+
+1. **Parse the markdown table** to extract:
+   - Commit titles (clean, without links)
+   - PR numbers 
+   - Authors (from the Authors column, not Approvers or QA)
+
+2. **Separate human authors from bots**:
+   - Filter out: @automation-bot[bot], @dependency-bot[bot], etc.
+   - Count bot commits but don't list them individually
+   - Focus on human-authored changes that need approval
+
+3. **Generate Slack message format**:
+   ```
+   🚀 **Production Deployment Approval Needed - {service-name}**
+   
+   Hey team! We have a production deployment ready for **{service-name}** with the following changes:
+   
+   **Author Changes Requiring Approval:**
+   • **@author1** - Commit title (#PR)
+   • **@author2** - Commit title (#PR)
+   
+   **Additional Changes:**
+   • X commits from @automation-bot (automated updates)
+   
+   **Deployment Details:**
+   • **Version**: old → new
+   • **Environment**: Production  
+   • **PR**: {PR_URL}
+   
+   Please review your changes and confirm approval for production deployment. Thanks! 🙏
+   
+   **Please Approve**: @author1 @author2
+   ```
+
+4. **Handle edge cases**:
+   - If only bot commits: "This deployment contains only automated updates - no manual approval needed. 🤖"
+   - Clean up commit titles (remove GitHub links, truncation artifacts)
+   - Only include actual commit authors in approval list
+
+5. **Output only the final Slack message** - no analysis or explanation text.
+EOF
+
+echo ""
+echo "=== END DEPLOYMENT DIFF DATA ==="
+echo ""
+echo "--- CLAUDE WORKFLOW SETUP INSTRUCTIONS ---"
+cat << 'EOF'
+TO SET UP THIS WORKFLOW IN CLAUDE CODE:
+
+1. **Add this workflow to your Claude context file (CLAUDE.md, context.md, or similar):**
+
+```markdown
+## DEPLOYMENT APPROVAL WORKFLOW
+
+**Trigger Phrases:**
+When user says any of these, automatically run the deployment approval workflow:
+- "get pr approval for <URL>"
+- "deployment approval for <URL>"  
+- "generate deployment approval <URL>"
+- "create deployment message for <URL>"
+- "slack approval for <URL>"
+
+**Automatic Workflow Steps:**
+1. Extract PR URL from user input
+2. Execute: `deployment-diff-claude <PR_URL>`
+3. Process the script output following the embedded parsing instructions
+4. Generate clean Slack approval message in the specified format
+
+**Claude Processing:**
+- Parse markdown table intelligently (handles complex nested brackets)
+- Extract clean commit titles (remove GitHub links and formatting)
+- Identify human authors vs bot commits  
+- Separate approval needs (authors only, not approvers/QA)
+- Handle edge cases (bot-only deployments, parsing errors)
+- Output properly formatted Slack message ready for team coordination
+
+**Tool Integration:**
+This follows the same pattern as `prr` (PR review) and `prc` (PR check) tools for 
+consistent Claude Code workflow integration.
+```
+
+2. **Usage Pattern:**
+   - User: "get pr approval for <PR_URL>"
+   - Claude: Runs script → Intelligently parses data → Outputs Slack message
+   - Result: Clean, actionable deployment approval message
+
+3. **Dependencies:**
+   - Requires `gh` CLI for GitHub API access
+   - Script handles all data extraction and formatting
+   - Claude handles intelligent parsing and message generation
+EOF
