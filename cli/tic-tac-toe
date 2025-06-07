@@ -1,0 +1,174 @@
+#!/bin/bash
+
+# Tic Tac Toe Game in Bash
+# A simple interactive command-line tic tac toe game
+
+# Initialize the game board
+declare -a board=(" " " " " " " " " " " " " " " " " ")
+current_player="X"
+game_over=false
+
+# Function to display the board
+display_board() {
+    echo
+    echo "   1   2   3"
+    echo "1  ${board[0]} | ${board[1]} | ${board[2]} "
+    echo "  -----------"
+    echo "2  ${board[3]} | ${board[4]} | ${board[5]} "
+    echo "  -----------"
+    echo "3  ${board[6]} | ${board[7]} | ${board[8]} "
+    echo
+}
+
+# Function to check if a position is valid and empty
+is_valid_move() {
+    local pos=$1
+    if [[ $pos -ge 0 && $pos -le 8 && "${board[$pos]}" == " " ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check for a win
+check_win() {
+    local player=$1
+    
+    # Check rows
+    for i in 0 3 6; do
+        if [[ "${board[$i]}" == "$player" && "${board[$((i+1))]}" == "$player" && "${board[$((i+2))]}" == "$player" ]]; then
+            return 0
+        fi
+    done
+    
+    # Check columns
+    for i in 0 1 2; do
+        if [[ "${board[$i]}" == "$player" && "${board[$((i+3))]}" == "$player" && "${board[$((i+6))]}" == "$player" ]]; then
+            return 0
+        fi
+    done
+    
+    # Check diagonals
+    if [[ "${board[0]}" == "$player" && "${board[4]}" == "$player" && "${board[8]}" == "$player" ]]; then
+        return 0
+    fi
+    if [[ "${board[2]}" == "$player" && "${board[4]}" == "$player" && "${board[6]}" == "$player" ]]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to check if board is full (tie)
+is_board_full() {
+    for cell in "${board[@]}"; do
+        if [[ "$cell" == " " ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Function to get player move
+get_player_move() {
+    local row col pos
+    
+    while true; do
+        echo "Player $current_player's turn"
+        read -p "Enter row (1-3): " row
+        read -p "Enter column (1-3): " col
+        
+        # Validate input
+        if [[ ! "$row" =~ ^[1-3]$ ]] || [[ ! "$col" =~ ^[1-3]$ ]]; then
+            echo "Invalid input! Please enter numbers 1-3 only."
+            continue
+        fi
+        
+        # Convert to array index (0-8)
+        pos=$(( (row-1) * 3 + (col-1) ))
+        
+        if is_valid_move $pos; then
+            board[$pos]=$current_player
+            break
+        else
+            echo "Position already taken! Choose another spot."
+        fi
+    done
+}
+
+# Function to switch players
+switch_player() {
+    if [[ "$current_player" == "X" ]]; then
+        current_player="O"
+    else
+        current_player="X"
+    fi
+}
+
+# Function to reset game
+reset_game() {
+    board=(" " " " " " " " " " " " " " " " " ")
+    current_player="X"
+    game_over=false
+}
+
+# Function to show game instructions
+show_instructions() {
+    echo "==================================="
+    echo "       TIC TAC TOE GAME"
+    echo "==================================="
+    echo
+    echo "How to play:"
+    echo "- Players take turns placing X and O"
+    echo "- Enter row and column numbers (1-3)"
+    echo "- Get 3 in a row to win!"
+    echo "- Type 'quit' to exit anytime"
+    echo
+}
+
+# Main game loop
+main_game() {
+    while true; do
+        display_board
+        
+        # Check for win condition
+        if check_win "X"; then
+            echo "🎉 Player X wins!"
+            break
+        elif check_win "O"; then
+            echo "🎉 Player O wins!"
+            break
+        elif is_board_full; then
+            echo "🤝 It's a tie!"
+            break
+        fi
+        
+        get_player_move
+        switch_player
+    done
+}
+
+# Main script execution
+clear
+show_instructions
+
+while true; do
+    main_game
+    echo
+    read -p "Play again? (y/n): " play_again
+    
+    case $play_again in
+        [Yy]* )
+            reset_game
+            clear
+            show_instructions
+            ;;
+        [Nn]* )
+            echo "Thanks for playing! 👋"
+            exit 0
+            ;;
+        * )
+            echo "Please answer y or n."
+            ;;
+    esac
+done
