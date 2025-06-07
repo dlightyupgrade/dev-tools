@@ -9,12 +9,24 @@ set -e
 PR_NUMBER="$1"
 REPO_PARAM="$2"
 CLAUDE_MODE="$3"
+CHECK_NEWLINES="$4"
+
+# Handle flag detection and repositioning
+if [[ "$REPO_PARAM" == "--claude" ]]; then
+    CLAUDE_MODE="--claude"
+    REPO_PARAM=""
+fi
+if [[ "$CLAUDE_MODE" == "--check-newlines" ]]; then
+    CHECK_NEWLINES="--check-newlines"
+    CLAUDE_MODE=""
+fi
+if [[ "$CHECK_NEWLINES" == "--claude" ]]; then
+    CLAUDE_MODE="--claude"
+    CHECK_NEWLINES=""
+fi
 
 # Auto-detect repository if not provided
-if [ -z "$REPO_PARAM" ] || [[ "$REPO_PARAM" == "--claude" ]]; then
-    if [ "$REPO_PARAM" == "--claude" ]; then
-        CLAUDE_MODE="--claude"
-    fi
+if [ -z "$REPO_PARAM" ] || [[ "$REPO_PARAM" == "--claude" ]] || [[ "$REPO_PARAM" == "--check-newlines" ]]; then
     # Try to detect from git remote
     if git remote get-url origin &>/dev/null; then
         REMOTE_URL=$(git remote get-url origin)
@@ -42,12 +54,13 @@ else
 fi
 
 if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" == "--help" ] || [ "$PR_NUMBER" == "-h" ]; then
-    echo "Usage: check-pr-violations <pr-number> [owner/repository] [--claude]"
+    echo "Usage: check-pr-violations <pr-number> [owner/repository] [--claude] [--check-newlines]"
     echo ""
     echo "Examples:"
-    echo "  check-pr-violations 2182                    # Auto-detect repo"
-    echo "  check-pr-violations 2182 myorg/myrepo       # Specify repo"
-    echo "  check-pr-violations 2182 --claude           # Auto-detect + Claude todo mode"
+    echo "  check-pr-violations 2182                              # Auto-detect repo"
+    echo "  check-pr-violations 2182 myorg/myrepo                 # Specify repo"
+    echo "  check-pr-violations 2182 --claude                     # Auto-detect + Claude todo mode"
+    echo "  check-pr-violations 2182 --claude --check-newlines    # Include missing newline check (slower)"
     echo "  check-pr-violations 2182 myorg/myrepo --claude"
     echo ""
     echo "Options:"
@@ -73,6 +86,7 @@ VIOLATIONS_JSON=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r 
 ')
 
 VIOLATIONS_COUNT=$(echo "$VIOLATIONS_JSON" | jq 'length')
+VIOLATIONS_COUNT=${VIOLATIONS_COUNT//[$'\t\r\n ']/}  # Remove whitespace/newlines
 
 # Check PR status and CI checks
 echo "🔍 Checking PR status and CI checks..."
@@ -85,28 +99,143 @@ HEAD_SHA=$(echo "$PR_INFO" | jq -r '.head.sha')
 CHECK_RUNS=$(gh api "repos/$OWNER/$REPO/commits/$HEAD_SHA/check-runs" | jq '.check_runs')
 FAILED_CHECKS=$(echo "$CHECK_RUNS" | jq -r '.[] | select(.conclusion == "failure") | .name')
 FAILED_CHECK_COUNT=$(echo "$CHECK_RUNS" | jq '[.[] | select(.conclusion == "failure")] | length')
+FAILED_CHECK_COUNT=${FAILED_CHECK_COUNT//[$'\t\r\n ']/}  # Remove whitespace/newlines
 PENDING_CHECK_COUNT=$(echo "$CHECK_RUNS" | jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
+PENDING_CHECK_COUNT=${PENDING_CHECK_COUNT//[$'\t\r\n ']/}  # Remove whitespace/newlines
+
+# Check if build is currently running and abort if so
+if [ "$PENDING_CHECK_COUNT" -gt 0 ]; then
+    RUNNING_CHECKS=$(echo "$CHECK_RUNS" | jq -r '.[] | select(.status == "in_progress" or .status == "queued") | .name')
+    echo "🔄 BUILD IN PROGRESS - Rebuilding, try again later"
+    echo ""
+    echo "Currently running checks:"
+    echo "$RUNNING_CHECKS" | while read -r check; do
+        [ -n "$check" ] && echo "  ⏳ $check"
+    done
+    echo ""
+    echo "💡 Wait for the build to complete, then re-run this script for accurate results."
+    exit 0
+fi
 
 echo "🔍 Checking review threads..."
-REVIEW_THREADS=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" | jq -r '
-    group_by(.original_position // .position) | 
-    map(select(length > 1)) | 
+REVIEW_THREADS=$(gh api graphql -f query="
+{
+  repository(owner: \"$OWNER\", name: \"$REPO\") {
+    pullRequest(number: $PR_NUMBER) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          isCollapsed
+          isOutdated
+          path
+          line
+          comments(first: 10) {
+            nodes {
+              author {
+                login
+              }
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}" | jq -r '
+    .data.repository.pullRequest.reviewThreads.nodes | 
+    map(select(.isResolved == false and .isCollapsed == false and .isOutdated == false)) |
     map({
-        file: .[0].path,
-        line: (.[0].original_line // .[0].line),
-        thread_length: length,
-        last_comment_author: .[-1].user.login,
-        first_comment_author: .[0].user.login,
-        last_comment_time: .[-1].created_at
-    }) | 
-    map(select(.first_comment_author != .last_comment_author))
+        file: .path,
+        line: .line,
+        thread_length: (.comments.nodes | length),
+        last_comment_author: (.comments.nodes | last | .author.login),
+        first_comment_author: (.comments.nodes | first | .author.login),
+        last_comment_time: (.comments.nodes | last | .createdAt),
+        first_comment_body: (.comments.nodes | first | .body),
+        last_comment_body: (.comments.nodes | last | .body),
+        is_resolved: .isResolved,
+        is_collapsed: .isCollapsed,
+        is_outdated: .isOutdated
+    })
 ')
 
 REVIEW_THREADS_COUNT=$(echo "$REVIEW_THREADS" | jq 'length')
+REVIEW_THREADS_COUNT=${REVIEW_THREADS_COUNT//[$'\t\r\n ']/}  # Remove whitespace/newlines
+
+# Function to extract action item from comment body
+extract_action_item() {
+    local comment_body="$1"
+    local file_name="$2"
+    local line_num="$3"
+    
+    # Clean up comment body - remove markdown, trim whitespace
+    local clean_comment=$(echo "$comment_body" | sed 's/```[^`]*```//g' | sed 's/`[^`]*`//g' | sed 's/\*\*//g' | sed 's/\*//g' | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ *//g' | sed 's/ *$//g')
+    
+    # Truncate if too long
+    if [ ${#clean_comment} -gt 100 ]; then
+        clean_comment="${clean_comment:0:97}..."
+    fi
+    
+    # Categorize action type based on common patterns
+    if echo "$clean_comment" | grep -qi "why\|what\|how\|explain\|clarify\|understand"; then
+        echo "Answer question: $clean_comment"
+    elif echo "$clean_comment" | grep -qi "remove\|delete\|unused"; then
+        echo "Remove: $clean_comment" 
+    elif echo "$clean_comment" | grep -qi "add\|include\|missing"; then
+        echo "Add: $clean_comment"
+    elif echo "$clean_comment" | grep -qi "change\|modify\|update\|fix"; then
+        echo "Fix: $clean_comment"
+    elif echo "$clean_comment" | grep -qi "consider\|suggest\|recommend"; then
+        echo "Consider: $clean_comment"
+    elif echo "$clean_comment" | grep -qi "should\|must\|need"; then
+        echo "Required: $clean_comment"
+    else
+        # Default - show first 80 chars of comment
+        if [ ${#clean_comment} -gt 80 ]; then
+            echo "Review: ${clean_comment:0:77}..."
+        else
+            echo "Review: $clean_comment"
+        fi
+    fi
+}
+
+# Check for missing trailing newlines (optional)
+MISSING_NEWLINES=""
+MISSING_NEWLINES_COUNT=0
+if [ "$CHECK_NEWLINES" == "--check-newlines" ]; then
+    echo "🔍 Checking for missing trailing newlines (this may take a moment)..."
+    
+    # Get list of modified files and check each one
+    MODIFIED_FILES=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/files" --paginate | jq -r '.[].filename')
+    
+    for file in $MODIFIED_FILES; do
+        # Small delay to be rate-limit friendly
+        sleep 0.1
+        
+        # Only check certain file types to reduce API calls
+        case "$file" in
+            *.java|*.xml|*.md|*.properties|*.yml|*.yaml|*.json|*.sql)
+                CONTENT=$(gh api "repos/$OWNER/$REPO/contents/$file?ref=$HEAD_SHA" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null)
+                if [ $? -eq 0 ] && [ -n "$CONTENT" ]; then
+                    # Check if last character is NOT a newline
+                    if ! printf '%s' "$CONTENT" | tail -c1 | grep -q '^$'; then
+                        MISSING_NEWLINES="${MISSING_NEWLINES}Missing newline: $file"$'\n'
+                    fi
+                fi
+                ;;
+        esac
+    done
+    
+    MISSING_NEWLINES_COUNT=$(echo "$MISSING_NEWLINES" | grep -c "Missing newline:" 2>/dev/null || echo 0)
+    MISSING_NEWLINES_COUNT=${MISSING_NEWLINES_COUNT//[$'\t\r\n ']/}  # Remove whitespace/newlines
+fi
 
 # Check for stale PR warnings from GitHub Actions
 STALE_COMMENTS=$(gh pr view "$PR_NUMBER" --comments --json comments | jq -r '.comments[] | select(.author.login == "github-actions[bot]" or .author.login == "github-actions") | select(.body | contains("stale") or contains("Stale")) | .body')
 STALE_COUNT=$(echo "$STALE_COMMENTS" | grep -c "stale\|Stale" 2>/dev/null || echo 0)
+STALE_COUNT=${STALE_COUNT//[$'\t\r\n ']/}  # Remove whitespace/newlines
 
 # Get PR author
 PR_AUTHOR=$(gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER" | jq -r '.user.login')
@@ -142,6 +271,13 @@ if [ "$PENDING_CHECK_COUNT" -gt 0 ]; then
     echo ""
 fi
 
+# Display missing newlines
+if [ "$MISSING_NEWLINES_COUNT" -gt 0 ]; then
+    echo "📄 MISSING TRAILING NEWLINES:"
+    echo "$MISSING_NEWLINES" | sed 's/Missing newline: /  📝 /' 
+    echo ""
+fi
+
 # Display stale PR warnings
 if [ "$STALE_COUNT" -gt 0 ]; then
     echo "⚠️  STALE PR WARNING:"
@@ -152,8 +288,8 @@ if [ "$STALE_COUNT" -gt 0 ]; then
 fi
 
 # Check if PR is completely clean
-if [ "$VIOLATIONS_COUNT" -eq 0 ] && [ "$REVIEW_THREADS_COUNT" -eq 0 ] && [ "$FAILED_CHECK_COUNT" -eq 0 ] && [ "$MERGEABLE" != "false" ] && [ "$MERGEABLE_STATE" != "dirty" ] && [ "$STALE_COUNT" -eq 0 ]; then
-    echo "✅ No violations, review threads, CI issues, or stale warnings found in PR #$PR_NUMBER"
+if [ "$VIOLATIONS_COUNT" -eq 0 ] && [ "$REVIEW_THREADS_COUNT" -eq 0 ] && [ "$FAILED_CHECK_COUNT" -eq 0 ] && [ "$MERGEABLE" != "false" ] && [ "$MERGEABLE_STATE" != "dirty" ] && [ "$STALE_COUNT" -eq 0 ] && [ "$MISSING_NEWLINES_COUNT" -eq 0 ]; then
+    echo "✅ No violations, review threads, CI issues, stale warnings, or missing newlines found in PR #$PR_NUMBER"
     if [ "$CLAUDE_MODE" == "--claude" ]; then
         echo ""
         echo "🤖 No todo items needed - PR is completely clean!"
@@ -169,17 +305,17 @@ if [ "$VIOLATIONS_COUNT" -gt 0 ]; then
     echo ""
 fi
 
-# Display review threads
+# Display review threads (truly unresolved only - not resolved, collapsed, or outdated)
 if [ "$REVIEW_THREADS_COUNT" -gt 0 ]; then
-    echo "💬 REVIEW THREADS:"
+    echo "💬 ACTIVE REVIEW THREADS (requiring attention):"
     echo "$REVIEW_THREADS" | jq -r --arg pr_author "$PR_AUTHOR" '.[] | 
-        "📁 File: \(.file)\n📍 Line: \(.line)\n💭 Thread: \(.thread_length) comments\n👤 Last response: \(.last_comment_author)\n" + 
-        (if .last_comment_author == $pr_author then "✅ Status: Author responded" else "❓ Status: Awaiting author response" end) + 
+        "📁 File: \(.file // "General comment")\n📍 Line: \(.line // "N/A")\n💭 Thread: \(.thread_length) comments\n👤 Last response: \(.last_comment_author)\n" + 
+        (if .last_comment_author == $pr_author then "✅ Status: Author responded - needs reviewer resolution" else "❓ Status: Awaiting author response" end) + 
         "\n" + ("─" * 80)'
     echo ""
 fi
 
-echo "📊 Summary: Found $VIOLATIONS_COUNT violation(s), $REVIEW_THREADS_COUNT review thread(s), $FAILED_CHECK_COUNT failed check(s), $STALE_COUNT stale warning(s)"
+echo "📊 Summary: Found $VIOLATIONS_COUNT violation(s), $REVIEW_THREADS_COUNT review thread(s), $FAILED_CHECK_COUNT failed check(s), $STALE_COUNT stale warning(s)$([ "$MISSING_NEWLINES_COUNT" -gt 0 ] && echo ", $MISSING_NEWLINES_COUNT missing newline(s)" || echo "")"
 if [ "$MERGEABLE" = "false" ] || [ "$MERGEABLE_STATE" = "dirty" ]; then
     echo "🚨 Merge conflicts detected - cannot merge until resolved"
 fi
@@ -193,13 +329,15 @@ if [ "$CLAUDE_MODE" == "--claude" ]; then
     echo "🤖 Generating todo list for Claude Code..."
     echo ""
     
-    # Count actionable items (violations + threads needing author response + CI failures + merge conflicts + stale warnings)
-    ACTIONABLE_VIOLATIONS=$VIOLATIONS_COUNT
+    # Count actionable items (violations + threads needing author response + CI failures + merge conflicts + stale warnings + missing newlines)
+    ACTIONABLE_VIOLATIONS=${VIOLATIONS_COUNT:-0}
     ACTIONABLE_THREADS=$(echo "$REVIEW_THREADS" | jq --arg pr_author "$PR_AUTHOR" '[.[] | select(.last_comment_author != $pr_author)] | length')
-    ACTIONABLE_CI=$FAILED_CHECK_COUNT
+    ACTIONABLE_THREADS=${ACTIONABLE_THREADS//[$'\t\r\n ']/}  # Remove whitespace/newlines
+    ACTIONABLE_CI=${FAILED_CHECK_COUNT:-0}
     ACTIONABLE_MERGE=$([ "$MERGEABLE" = "false" ] || [ "$MERGEABLE_STATE" = "dirty" ] && echo 1 || echo 0)
-    ACTIONABLE_STALE=$STALE_COUNT
-    TOTAL_ACTIONABLE=$((ACTIONABLE_VIOLATIONS + ACTIONABLE_THREADS + ACTIONABLE_CI + ACTIONABLE_MERGE + ACTIONABLE_STALE))
+    ACTIONABLE_STALE=${STALE_COUNT:-0}
+    ACTIONABLE_NEWLINES=${MISSING_NEWLINES_COUNT:-0}
+    TOTAL_ACTIONABLE=$((ACTIONABLE_VIOLATIONS + ACTIONABLE_THREADS + ACTIONABLE_CI + ACTIONABLE_MERGE + ACTIONABLE_STALE + ACTIONABLE_NEWLINES))
     
     if [ "$TOTAL_ACTIONABLE" -eq 0 ]; then
         echo "🎉 No actionable items found!"
@@ -221,13 +359,23 @@ if [ "$CLAUDE_MODE" == "--claude" ]; then
             done
         fi
         
-        # Add review thread todos  
+        # Add review thread todos with specific action items
         if [ "$ACTIONABLE_THREADS" -gt 0 ]; then
-            echo "$REVIEW_THREADS" | jq -r --arg pr_author "$PR_AUTHOR" 'to_entries | .[] | select(.value.last_comment_author != $pr_author) |
-                "TODO #\(.key + '$VIOLATIONS_COUNT' + 1): Respond to review comment in \(.value.file | split("/") | .[-1]) line \(.value.line)"' |
-            while read -r todo; do
-                echo "  $todo"
-            done
+            TODO_BASE=$VIOLATIONS_COUNT
+            COUNTER=1
+            # Use a more robust approach to handle comment bodies with spaces and newlines
+            while IFS= read -r thread_data; do
+                if [ -n "$thread_data" ]; then
+                    file=$(echo "$thread_data" | jq -r '.file // "Unknown"')
+                    line=$(echo "$thread_data" | jq -r '.line // "0"')
+                    comment_body=$(echo "$thread_data" | jq -r '.first_comment_body // ""')
+                    
+                    file_name=$(basename "$file")
+                    action_item=$(extract_action_item "$comment_body" "$file_name" "$line")
+                    echo "  TODO #$((TODO_BASE + COUNTER)): $action_item in $file_name line $line"
+                    ((COUNTER++))
+                fi
+            done < <(echo "$REVIEW_THREADS" | jq -c --arg pr_author "$PR_AUTHOR" '.[] | select(.last_comment_author != $pr_author)')
         fi
         
         # Add CI failure todos
@@ -259,6 +407,20 @@ if [ "$CLAUDE_MODE" == "--claude" ]; then
         if [ "$ACTIONABLE_STALE" -gt 0 ]; then
             TODO_NUM=$((VIOLATIONS_COUNT + ACTIONABLE_THREADS + ACTIONABLE_CI + ACTIONABLE_MERGE + 1))
             echo "  TODO #$TODO_NUM: Address stale PR warning (add activity or remove stale label)"
+        fi
+        
+        # Add missing newlines todos
+        if [ "$ACTIONABLE_NEWLINES" -gt 0 ]; then
+            TODO_BASE=$((VIOLATIONS_COUNT + ACTIONABLE_THREADS + ACTIONABLE_CI + ACTIONABLE_MERGE + ACTIONABLE_STALE))
+            COUNTER=1
+            echo "$MISSING_NEWLINES" | grep "Missing newline:" | while read -r newline_info; do
+                if [ -n "$newline_info" ]; then
+                    file_name=$(echo "$newline_info" | sed 's/Missing newline: //')
+                    file_basename=$(basename "$file_name")
+                    echo "  TODO #$((TODO_BASE + COUNTER)): Add trailing newline to $file_basename"
+                    ((COUNTER++))
+                fi
+            done
         fi
         
         echo ""

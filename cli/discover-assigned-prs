@@ -1,0 +1,221 @@
+#!/bin/bash
+
+# discover-assigned-prs
+# Discovers open PRs assigned to the current user via GitHub GraphQL API
+# and adds missing entries to the branch tracking file
+
+set -euo pipefail
+
+# Configuration
+TRACKING_FILE="$HOME/.config/dev-tools/to-rebase.txt"
+SCRIPT_NAME="$(basename "$0")"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Help function
+show_help() {
+    cat << EOF
+Usage: $SCRIPT_NAME [OPTIONS]
+
+Discovers open PRs assigned to you via GitHub GraphQL API and updates
+the branch tracking file with any missing entries.
+
+OPTIONS:
+    -h, --help          Show this help message
+    -d, --dry-run       Show what would be added without modifying tracking file
+    -v, --verbose       Show detailed output
+    --tracking-file     Specify custom tracking file (default: $TRACKING_FILE)
+
+EXAMPLES:
+    $SCRIPT_NAME                    # Discover and add missing PR branches
+    $SCRIPT_NAME --dry-run          # Preview what would be added
+    $SCRIPT_NAME --verbose          # Show detailed discovery process
+
+INTEGRATION:
+    This script can be called standalone or integrated with other tools like PRU.
+    It uses the GitHub CLI (gh) to query for assigned PRs.
+
+EOF
+}
+
+# Parse command line arguments
+DRY_RUN=false
+VERBOSE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -d|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        --tracking-file)
+            TRACKING_FILE="$2"
+            shift 2
+            ;;
+        *)
+            echo -e "${RED}Error: Unknown option '$1'${NC}" >&2
+            echo "Use '$SCRIPT_NAME --help' for usage information." >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Utility functions
+log_info() {
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo -e "${BLUE}[INFO]${NC} $1"
+    fi
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+# Check prerequisites
+check_prerequisites() {
+    log_info "Checking prerequisites..."
+    
+    if ! command -v gh &> /dev/null; then
+        log_error "GitHub CLI (gh) is not installed or not in PATH"
+        exit 1
+    fi
+    
+    if ! gh auth status &> /dev/null; then
+        log_error "GitHub CLI is not authenticated. Run 'gh auth login' first."
+        exit 1
+    fi
+    
+    log_info "Prerequisites check passed"
+}
+
+# Ensure tracking file exists
+ensure_tracking_file() {
+    if [[ ! -f "$TRACKING_FILE" ]]; then
+        log_info "Creating tracking file: $TRACKING_FILE"
+        mkdir -p "$(dirname "$TRACKING_FILE")"
+        touch "$TRACKING_FILE"
+    fi
+}
+
+# Get assigned PRs using GitHub GraphQL
+get_assigned_prs() {
+    log_info "Querying GitHub for assigned PRs..."
+    
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Execute GraphQL query
+    gh api graphql -f query='query { search(query: "is:open is:pr assignee:@me org:Credify", type: ISSUE, first: 50) { nodes { ... on PullRequest { headRefName repository { name owner { login } } url title updatedAt } } } }' > "$temp_file"
+    
+    # Parse and output results
+    jq -r '.data.search.nodes[] | "\(.headRefName)|\(.repository.name)|\(.url)|\(.title)"' "$temp_file"
+    
+    rm "$temp_file"
+}
+
+# Check if branch is already tracked
+is_branch_tracked() {
+    local branch="$1"
+    local repo="$2"
+    
+    # Check for exact match: branch|any|any|repo|any|any
+    grep -q "^${branch}|.*|.*|${repo}|.*|.*$" "$TRACKING_FILE" 2>/dev/null
+}
+
+# Add branch to tracking file
+add_to_tracking() {
+    local branch="$1"
+    local repo="$2"
+    local url="$3"
+    local today
+    today=$(date +%Y-%m-%d)
+    
+    # Format: branch|url|status|repo|date|source
+    local entry="${branch}|${url}|open|${repo}|${today}|PR_ASSIGNED"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY-RUN]${NC} Would add: $entry"
+    else
+        echo "$entry" >> "$TRACKING_FILE"
+        log_success "Added: $branch ($repo)"
+    fi
+}
+
+# Main discovery function
+discover_and_track_prs() {
+    local added_count=0
+    local existing_count=0
+    
+    log_info "Starting PR discovery..."
+    
+    # Get PR data and process each line
+    while IFS='|' read -r branch repo url title; do
+        if [[ -z "$branch" || -z "$repo" || -z "$url" ]]; then
+            continue
+        fi
+        
+        log_info "Checking PR: $branch ($repo)"
+        
+        if is_branch_tracked "$branch" "$repo"; then
+            log_info "Already tracked: $branch ($repo)"
+            ((existing_count++))
+        else
+            log_info "Adding new tracking entry: $branch ($repo)"
+            add_to_tracking "$branch" "$repo" "$url"
+            ((added_count++))
+        fi
+        
+    done < <(get_assigned_prs)
+    
+    # Summary
+    echo
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${BLUE}DRY-RUN SUMMARY:${NC}"
+        echo "  Would add: $added_count new branches"
+    else
+        echo -e "${GREEN}DISCOVERY SUMMARY:${NC}"
+        echo "  Added: $added_count new branches"
+    fi
+    echo "  Already tracked: $existing_count branches"
+}
+
+# Main execution
+main() {
+    log_info "Starting PR discovery process..."
+    
+    check_prerequisites
+    ensure_tracking_file
+    discover_and_track_prs
+    
+    if [[ "$DRY_RUN" == "false" && "$VERBOSE" == "true" ]]; then
+        echo
+        log_info "Current tracking file contents:"
+        cat "$TRACKING_FILE"
+    fi
+    
+    log_success "PR discovery completed"
+}
+
+# Execute main function
+main "$@"
