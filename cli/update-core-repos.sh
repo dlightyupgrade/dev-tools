@@ -81,6 +81,8 @@ CLEANUP_MODE="false"
 DRY_RUN="false"
 CONFIRM_CLEANUP="false"
 DELETE_LOCAL_BRANCHES="false"
+BRANCH_MODE="false"
+REPO_MODE="false"
 
 # Colors - initialize early
 if [[ -t 1 ]]; then
@@ -273,14 +275,75 @@ is_protected_branch() {
 }
 
 #===============================================================
+# TRACKING FILE BRANCH LOOKUP
+#===============================================================
+# Look up branch in tracking file to find repository
+lookup_branch_in_tracking() {
+    local branch="$1"
+    local tracking_file="$2"
+    
+    [[ ! -f "$tracking_file" ]] && return 1
+    
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Parse the line
+        local tracking_data
+        if ! parse_tracking_line "$line" tracking_data; then
+            continue
+        fi
+        
+        local tracked_branch="${tracking_data[0]}"
+        local repo="${tracking_data[3]}"
+        
+        if [[ "$tracked_branch" == "$branch" ]]; then
+            echo "$repo"
+            return 0
+        fi
+    done < "$tracking_file"
+    
+    return 1
+}
+
+#===============================================================
 # SINGLE TARGET PROCESSING
 #===============================================================
 parse_single_target() {
     local target="$1"
     local repo_name="" branch_name=""
     
+    # Handle explicit branch mode
+    if [[ "$BRANCH_MODE" == "true" ]]; then
+        branch_name="$target"
+        
+        # Look up branch in tracking file first
+        repo_name="$(lookup_branch_in_tracking "$branch_name" "$REBASE_FILE")"
+        
+        if [[ -z "$repo_name" ]]; then
+            # Fall back to current directory if not found in tracking
+            if git rev-parse --git-dir >/dev/null 2>&1; then
+                local current_repo_path
+                current_repo_path="$(git rev-parse --show-toplevel 2>/dev/null)"
+                repo_name="$(basename "$current_repo_path" 2>/dev/null)"
+                log_debug "Branch mode: $branch_name not found in tracking, using current repo: $repo_name"
+            else
+                log_error "Branch '$branch_name' not found in tracking file and not in a git repository"
+                log_error "Run from within a repository or ensure branch is tracked in: $REBASE_FILE"
+                return 1
+            fi
+        else
+            log_debug "Branch mode: found $branch_name in repo $repo_name via tracking file"
+        fi
+        
+    # Handle explicit repo mode
+    elif [[ "$REPO_MODE" == "true" ]]; then
+        repo_name="$target"
+        branch_name=""  # Will detect user branches
+        log_debug "Repo mode: repo=$repo_name (will detect user branches)"
+        
     # GitHub PR URL format: https://github.com/org/repo-name/pull/123
-    if [[ "$target" =~ ^https://github\.com/[^/]+/([^/]+)/pull/[0-9]+$ ]]; then
+    elif [[ "$target" =~ ^https://github\.com/[^/]+/([^/]+)/pull/[0-9]+$ ]]; then
         repo_name="${BASH_REMATCH[1]}"
         
         # Use gh CLI to get the branch name
@@ -508,6 +571,78 @@ check_branch_pr_status() {
     return 0
 }
 
+# Get PR details using GitHub GraphQL API
+get_pr_details_from_url() {
+    local pr_url="$1"
+    
+    if [[ -z "$pr_url" || "$pr_url" == "auto" || "$pr_url" == "none" ]]; then
+        return 1
+    fi
+    
+    # Extract PR number from URL
+    if [[ "$pr_url" =~ /pull/([0-9]+)$ ]]; then
+        local pr_number="${BASH_REMATCH[1]}"
+        
+        if command -v gh >/dev/null 2>&1; then
+            # Get PR details via GraphQL
+            gh pr view "$pr_number" --json headRefName,state,mergedAt --jq '. | "\(.headRefName)|\(.state)|\(.mergedAt)"' 2>/dev/null || echo ""
+        else
+            return 1
+        fi
+    else
+        return 1
+    fi
+}
+
+# Enhanced branch status detection using PR information
+check_branch_status_enhanced() {
+    local repo_path="$1"
+    local branch="$2"
+    local pr_url="${3:-}"
+    
+    cd "$repo_path" || return 1
+    
+    # Check if branch exists locally
+    if ! git show-ref --verify --quiet refs/heads/"$branch" 2>/dev/null; then
+        echo "not_found"
+        return 0
+    fi
+    
+    # If we have a PR URL, use GraphQL API for accurate status
+    if [[ -n "$pr_url" && "$pr_url" != "auto" && "$pr_url" != "none" ]]; then
+        local pr_details
+        pr_details="$(get_pr_details_from_url "$pr_url")"
+        
+        if [[ -n "$pr_details" ]]; then
+            local pr_branch="${pr_details%%|*}"
+            local pr_state="${pr_details#*|}"
+            pr_state="${pr_state%%|*}"
+            local merged_at="${pr_details##*|}"
+            
+            # Verify branch name matches
+            if [[ "$pr_branch" == "$branch" ]]; then
+                case "$pr_state" in
+                    MERGED|merged) 
+                        echo "merged_pr"
+                        return 0 ;;
+                    OPEN|open) 
+                        echo "open_pr"
+                        return 0 ;;
+                    CLOSED|closed) 
+                        echo "closed_pr"
+                        return 0 ;;
+                    DRAFT|draft) 
+                        echo "draft_pr"
+                        return 0 ;;
+                esac
+            fi
+        fi
+    fi
+    
+    # Fall back to original logic if no PR URL or GraphQL failed
+    check_branch_pr_status "$repo_path" "$branch"
+}
+
 # Auto-detect PR URL for a branch
 detect_pr_url() {
     local repo_path="$1"
@@ -543,96 +678,145 @@ update_branch_tracking() {
     local tracking_file="$1"
     local repo_path="${2:-}"
     local single_branch="${3:-}"
+    local known_pr_url="${4:-}"
     
     [[ ! -f "$tracking_file" ]] && return 0
     
-    local temp_file="${tracking_file}.update.$$"
     local updated_count=0
     
-    # Process each line in tracking file
-    while IFS= read -r line; do
-        # Copy comments and empty lines as-is
-        if [[ -z "$line" || "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
-            echo "$line" >> "$temp_file"
-            continue
+    # For single branch mode, check if branch exists in repo but not in tracking
+    if [[ -n "$single_branch" && -n "$repo_path" ]]; then
+        cd "$repo_path" || return 1
+        
+        # Check if branch exists locally
+        if ! git show-ref --verify --quiet refs/heads/"$single_branch" 2>/dev/null; then
+            [[ "$VERBOSE" == "true" ]] && log_info "Branch '$single_branch' not found in repository"
+            return 0
         fi
         
-        # Parse the line
-        local tracking_data
-        if ! parse_tracking_line "$line" tracking_data; then
-            echo "$line" >> "$temp_file"
-            continue
-        fi
+        # Check if branch already exists in tracking file and update if needed
+        local branch_exists=false
+        local temp_file="${tracking_file}.update.$$"
         
-        local branch="${tracking_data[0]}"
-        local pr_url="${tracking_data[1]}"
-        local status="${tracking_data[2]}"
-        local repo="${tracking_data[3]}"
-        local date="${tracking_data[4]}"
-        local notes="${tracking_data[5]}"
-        
-        # Skip if processing single branch and this isn't it
-        if [[ -n "$single_branch" && "$branch" != "$single_branch" ]]; then
-            echo "$line" >> "$temp_file"
-            continue
-        fi
-        
-        # Update status by checking repositories
-        local new_status="unknown"
-        local new_pr_url="$pr_url"
-        local new_notes="$notes"
-        
-        # Check status across repositories
-        if [[ -n "$repo_path" ]]; then
-            # Single repository mode
-            new_status="$(check_branch_pr_status "$repo_path" "$branch")"
-            [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_path" "$branch")"
-        else
-            # Multi-repository mode
-            for repo_dir in "${REPOS[@]}"; do
-                local repo_status
-                repo_status="$(check_branch_pr_status "$repo_dir" "$branch")"
-                
-                # Priority: merged > open_pr > active > not_found
-                case "$repo_status" in
-                    merged*|merged_pr)
-                        new_status="merged"
-                        [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_dir" "$branch")"
-                        break ;;
-                    open_pr|draft_pr)
-                        [[ "$new_status" != "merged" ]] && new_status="open"
-                        [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_dir" "$branch")"
-                        ;;
-                    closed_pr)
-                        [[ "$new_status" != "merged" && "$new_status" != "open" ]] && new_status="closed"
-                        [[ "$pr_url" == "auto" ]] && new_pr_url="$(detect_pr_url "$repo_dir" "$branch")"
-                        ;;
-                    active)
-                        [[ "$new_status" == "unknown" ]] && new_status="active"
-                        ;;
-                esac
-            done
-        fi
-        
-        # Add cleanup marker for merged branches
-        if [[ "$new_status" == "merged" && "$status" != "merged" ]]; then
-            if [[ "$notes" != *"CLEANUP_NEEDED"* ]]; then
-                new_notes="${notes:+$notes,}CLEANUP_NEEDED"
+        while IFS= read -r line; do
+            # Copy comments and empty lines as-is
+            if [[ -z "$line" || "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+                echo "$line" >> "$temp_file"
+                continue
             fi
-        fi
+            
+            local tracking_data
+            if ! parse_tracking_line "$line" tracking_data; then
+                echo "$line" >> "$temp_file"
+                continue
+            fi
+            
+            local tracked_branch="${tracking_data[0]}"
+            if [[ "$tracked_branch" == "$single_branch" ]]; then
+                branch_exists=true
+                
+                # Get current tracking data
+                local old_pr_url="${tracking_data[1]}"
+                local old_status="${tracking_data[2]}"
+                local repo="${tracking_data[3]}"
+                local date="${tracking_data[4]}"
+                local old_notes="${tracking_data[5]}"
+                
+                # Get current branch status using enhanced detection
+                local pr_url="$known_pr_url"
+                if [[ -z "$pr_url" ]]; then
+                    pr_url="$(detect_pr_url "$repo_path" "$single_branch")"
+                    [[ -z "$pr_url" ]] && pr_url="auto"
+                fi
+                
+                local branch_status="$(check_branch_status_enhanced "$repo_path" "$single_branch" "$pr_url")"
+                
+                # Set status based on branch status
+                local new_status="unknown"
+                case "$branch_status" in
+                    merged*|merged_pr) new_status="merged" ;;
+                    open_pr) new_status="open" ;;
+                    draft_pr) new_status="draft" ;;
+                    closed_pr) new_status="closed" ;;
+                    active) new_status="active" ;;
+                esac
+                
+                # Update notes for merged branches
+                local new_notes="$old_notes"
+                if [[ "$new_status" == "merged" && "$old_status" != "merged" ]]; then
+                    if [[ "$new_notes" != *"CLEANUP_NEEDED"* ]]; then
+                        new_notes="${new_notes:+$new_notes,}CLEANUP_NEEDED"
+                    fi
+                fi
+                
+                # Use known PR URL if provided, otherwise keep existing
+                local new_pr_url="$pr_url"
+                if [[ "$known_pr_url" != "" ]]; then
+                    new_pr_url="$known_pr_url"
+                elif [[ "$old_pr_url" != "auto" ]]; then
+                    new_pr_url="$old_pr_url"
+                fi
+                
+                # Write updated line
+                echo "$single_branch|$new_pr_url|$new_status|$repo|$date|$new_notes" >> "$temp_file"
+                
+                # Track if we actually updated something
+                if [[ "$new_status" != "$old_status" || "$new_pr_url" != "$old_pr_url" || "$new_notes" != "$old_notes" ]]; then
+                    ((updated_count++))
+                    [[ "$VERBOSE" == "true" ]] && log_info "Updated branch '$single_branch': $old_status -> $new_status"
+                else
+                    [[ "$VERBOSE" == "true" ]] && log_info "Branch '$single_branch' already up to date"
+                fi
+            else
+                # Copy other entries as-is
+                echo "$line" >> "$temp_file"
+            fi
+        done < "$tracking_file"
         
-        # Write updated line
-        echo "$branch|$new_pr_url|$new_status|$repo|$date|$new_notes" >> "$temp_file"
-        
-        # Track if we actually updated something
-        if [[ "$new_status" != "$status" || "$new_pr_url" != "$pr_url" || "$new_notes" != "$notes" ]]; then
+        # If branch doesn't exist in tracking, add it
+        if [[ "$branch_exists" == "false" ]]; then
+            log_info "Adding missing branch '$single_branch' to tracking file"
+            
+            # Get repository name
+            local repo_name="$(basename "$repo_path")"
+            
+            # Use known PR URL if provided, otherwise detect it
+            local pr_url="$known_pr_url"
+            if [[ -z "$pr_url" ]]; then
+                pr_url="$(detect_pr_url "$repo_path" "$single_branch")"
+                [[ -z "$pr_url" ]] && pr_url="auto"
+            fi
+            
+            # Use enhanced status detection with PR information
+            local branch_status="$(check_branch_status_enhanced "$repo_path" "$single_branch" "$pr_url")"
+            
+            # Set status based on branch status
+            local status="unknown"
+            case "$branch_status" in
+                merged*|merged_pr) status="merged" ;;
+                open_pr) status="open" ;;
+                draft_pr) status="draft" ;;
+                closed_pr) status="closed" ;;
+                active) status="active" ;;
+            esac
+            
+            # Add cleanup marker for merged branches
+            local notes="AUTO_DETECTED"
+            if [[ "$status" == "merged" ]]; then
+                notes="AUTO_DETECTED,CLEANUP_NEEDED"
+            fi
+            
+            # Add to temp file
+            local current_date="$(date +%Y-%m-%d)"
+            echo "$single_branch|$pr_url|$status|$repo_name|$current_date|$notes" >> "$temp_file"
             ((updated_count++))
+            
+            [[ "$VERBOSE" == "true" ]] && log_info "Added branch '$single_branch' with status '$status'"
         fi
         
-    done < "$tracking_file"
-    
-    # Replace original file
-    mv "$temp_file" "$tracking_file"
+        # Replace original file with updated temp file
+        mv "$temp_file" "$tracking_file"
+    fi
     
     [[ "$VERBOSE" == "true" ]] && log_info "Updated tracking info for $updated_count branches"
     
@@ -779,7 +963,16 @@ cleanup_merged_branches() {
                 echo
                 
                 # Check which repos contain this branch
-                for repo_path in "${REPOS[@]}"; do
+                local repo_paths=()
+                if [[ -n "${SINGLE_REPO_PATH:-}" ]]; then
+                    # Single target mode - only check the specific repository
+                    repo_paths=("$SINGLE_REPO_PATH")
+                else
+                    # Multi-repository mode - check all repositories
+                    repo_paths=("${REPOS[@]}")
+                fi
+                
+                for repo_path in "${repo_paths[@]}"; do
                     local repo_name="$(basename "$repo_path")"
                     cd "$repo_path" || continue
                     
@@ -802,8 +995,17 @@ cleanup_merged_branches() {
                 [[ "$pr_url" != "auto" && "$pr_url" != "none" ]] && printf " (PR: %s)" "$pr_url"
                 echo
                 
-                # Delete from all repositories
-                for repo_path in "${REPOS[@]}"; do
+                # Delete from repositories
+                local repo_paths=()
+                if [[ -n "${SINGLE_REPO_PATH:-}" ]]; then
+                    # Single target mode - only check the specific repository
+                    repo_paths=("$SINGLE_REPO_PATH")
+                else
+                    # Multi-repository mode - check all repositories
+                    repo_paths=("${REPOS[@]}")
+                fi
+                
+                for repo_path in "${repo_paths[@]}"; do
                     local repo_name="$(basename "$repo_path")"
                     cd "$repo_path" || continue
                     
@@ -1432,6 +1634,8 @@ OPTIONS:
     -n, --no-push       Don't force push rebased branches to origin
     -f, --force         Force rebase even if master wasn't updated
     -s, --single TARGET Process only one branch or PR (see formats below)
+    --branch BRANCH     Process single branch (looks up repo in tracking file)
+    --repo REPO         Process all user branches in specified repository
     -v, --verbose       Enable verbose output with debug information
     -g, --generate      Generate example configuration files and exit
     --update-tracking   Update branch/PR status in tracking file without rebasing
@@ -1460,6 +1664,8 @@ EXAMPLES:
     update-core-repos.sh -v                # Run with verbose output
     update-core-repos.sh --generate         # Create example configuration files
     update-core-repos.sh custom-repos.txt  # Use custom repository list
+    update-core-repos.sh --branch SI-8232_MigrateFinalPaymentReminder  # Process branch (auto-detect repo)
+    update-core-repos.sh --repo loan-hardship-servicing-srvc           # Process all user branches in repo
     update-core-repos.sh -s feature-branch # Rebase single branch in current repo
     update-core-repos.sh -s repo:branch    # Rebase specific repo:branch
     update-core-repos.sh -s https://github.com/org/repo/tree/branch  # Rebase branch URL
@@ -1472,7 +1678,12 @@ EXAMPLES:
     update-core-repos.sh --cleanup --confirm # Perform branch cleanup (remote only)
     update-core-repos.sh --cleanup --confirm --delete-local # Full cleanup including local branches
     
-    # Single target examples:
+    # New explicit mode examples:
+    update-core-repos.sh --branch my-feature-branch --cleanup --confirm  # Cleanup specific branch
+    update-core-repos.sh --repo my-repo --update-tracking               # Update tracking for all repo branches  
+    update-core-repos.sh --branch SI-1234-fix --show-cleanup            # Show cleanup status for branch
+    
+    # Single target examples (legacy):
     update-core-repos.sh -s my-repo         # Process all user branches in repo
     update-core-repos.sh -s .               # Process user branches in current repo
     update-core-repos.sh -s my-repo:branch  # Process specific branch
@@ -1494,6 +1705,12 @@ parse_arguments() {
             -s|--single)
                 [[ -z "${2:-}" ]] && { log_error "Option $1 requires an argument"; exit 1; }
                 SINGLE_TARGET="$2"; shift ;;
+            --branch)
+                [[ -z "${2:-}" ]] && { log_error "Option $1 requires an argument"; exit 1; }
+                SINGLE_TARGET="$2"; BRANCH_MODE="true"; shift ;;
+            --repo)
+                [[ -z "${2:-}" ]] && { log_error "Option $1 requires an argument"; exit 1; }
+                SINGLE_TARGET="$2"; REPO_MODE="true"; shift ;;
             -v|--verbose) VERBOSE="true" ;;
             --update-tracking) UPDATE_TRACKING_ONLY="true" ;;
             --show-cleanup) SHOW_CLEANUP_ONLY="true" ;;
@@ -1572,7 +1789,12 @@ main() {
                 exit 1
             fi
             log_info "Updating tracking for single target: $(basename "$SINGLE_REPO_PATH"):$SINGLE_BRANCH_NAME"
-            update_branch_tracking "$REBASE_FILE" "$SINGLE_REPO_PATH" "$SINGLE_BRANCH_NAME"
+            # Pass the original target if it was a PR URL
+            local pr_url=""
+            if [[ "$SINGLE_TARGET" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$ ]]; then
+                pr_url="$SINGLE_TARGET"
+            fi
+            update_branch_tracking "$REBASE_FILE" "$SINGLE_REPO_PATH" "$SINGLE_BRANCH_NAME" "$pr_url"
         else
             if ! load_repositories "$CONFIG_FILE"; then
                 log_error "Failed to load repositories from configuration"

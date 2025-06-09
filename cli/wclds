@@ -1,0 +1,111 @@
+#!/bin/bash
+
+# iTerm Workstream Claude Launch Script
+# Creates new iTerm2 pane/tab and launches Claude workstream with session tracking
+# Usage: wclds "your prompt here" (new tab, default)
+# Usage: wclds --horizontal "your prompt here" (split horizontally)
+# Usage: wclds --tab "your prompt here" (new tab, explicit)
+
+# Parse arguments for layout type
+LAYOUT_TYPE="new_tab"  # default - new tab is most reliable
+if [[ "$1" == "--horizontal" || "$1" == "-h" ]]; then
+    LAYOUT_TYPE="split_horizontal"
+    CLAUDE_PROMPT="${2:-focused workstream development and coordination}"
+elif [[ "$1" == "--tab" || "$1" == "-t" ]]; then
+    LAYOUT_TYPE="new_tab"
+    CLAUDE_PROMPT="${2:-focused workstream development and coordination}"
+else
+    CLAUDE_PROMPT="${1:-focused workstream development and coordination}"
+fi
+
+echo "🚀 Launching Claude in new iTerm2 pane..."
+echo "📝 Prompt: $CLAUDE_PROMPT"
+if [[ "$LAYOUT_TYPE" == "split_horizontal" ]]; then
+    echo "📐 Layout: horizontal split"
+else
+    echo "📐 Layout: new tab"
+fi
+
+# Get current working directory for the new pane
+CURRENT_DIR=$(pwd)
+
+# Create temporary expect script
+TEMP_SCRIPT=$(mktemp)
+
+# Create the expect script with proper escaping
+cat > "$TEMP_SCRIPT" << 'SCRIPT_EOF'
+#!/usr/bin/expect -f
+set timeout 2
+spawn claude "start new daily tracking and PLACEHOLDER_PROMPT"
+expect "Press Shift+Tab to approve"
+sleep 0.1
+send "\033\[Z"
+interact
+SCRIPT_EOF
+
+# Replace placeholder with actual prompt
+ESCAPED_PROMPT=$(echo "$CLAUDE_PROMPT" | sed 's/\//\\\//g; s/"/\\"/g')
+sed -i '' "s/PLACEHOLDER_PROMPT/$ESCAPED_PROMPT/g" "$TEMP_SCRIPT"
+
+chmod +x "$TEMP_SCRIPT"
+
+# Create new iTerm2 pane and run the expect script
+if [[ "$LAYOUT_TYPE" == "new_tab" ]]; then
+    osascript <<EOF
+tell application "iTerm2"
+    activate
+    tell current window
+        -- Create new tab
+        create tab with default profile
+        
+        -- Get the new tab's session
+        set newSession to current session of current tab
+        
+        -- Run expect script in the new tab
+        tell newSession
+            write text "cd ~"
+            delay 0.5
+            write text "echo 'Starting Claude workstream...'"
+            delay 0.5
+            write text "$TEMP_SCRIPT"
+        end tell
+    end tell
+end tell
+EOF
+else
+    osascript <<EOF
+tell application "iTerm2"
+    activate
+    tell current window
+        set currentTab to current tab
+        
+        -- Store reference to original session before splitting
+        set originalSession to current session of currentTab
+        
+        -- Split horizontally to create new pane
+        tell originalSession
+            split horizontally with default profile
+        end tell
+        
+        -- Wait for new session to be created and get the last one
+        delay 0.5
+        set allSessions to sessions of currentTab
+        set newSession to last item of allSessions
+        
+        -- Run expect script in the new pane
+        tell newSession
+            write text "cd ~"
+            delay 0.5
+            write text "echo 'Starting Claude workstream...'"
+            delay 0.5
+            write text "$TEMP_SCRIPT"
+        end tell
+    end tell
+end tell
+EOF
+fi
+
+# Clean up temporary script after a short delay
+(sleep 10 && rm -f "$TEMP_SCRIPT") &
+
+echo "✅ Claude launched in new iTerm2 pane!"

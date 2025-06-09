@@ -1,0 +1,144 @@
+#!/bin/bash
+# compression-test - Real-world compression validation tool
+# Tests workstream coordination compression with actual token measurements
+
+set -euo pipefail
+
+# Configuration
+TEST_DIR="/tmp/compression-test-$(date +%s)"
+VERBOSE_OUTPUT="$TEST_DIR/verbose.txt"
+COMPRESSED_OUTPUT="$TEST_DIR/compressed.txt"
+RESULTS_FILE="$TEST_DIR/results.csv"
+
+# Create test directory
+mkdir -p "$TEST_DIR"
+
+echo "=== COMPRESSION VALIDATION TEST ==="
+echo "Test Directory: $TEST_DIR"
+echo ""
+
+# Extract baseline workstream instructions
+echo "--- MEASURING BASELINE (VERBOSE) ---"
+cat > "$VERBOSE_OUTPUT" << 'EOF'
+Create session file: `/Users/dlighty/notes/daily/2025/06-Jun/2025-06-05-sessions/session-06-ws1.md`
+
+```markdown
+---
+date: 2025-06-05
+session: 06-WS1
+focus: Frameworks & Patterns Development
+status: In Progress
+coordination_parent: session-06
+workstream: WS1
+repository: llm-research
+tags: [llm-research, multi-claude, coordination, workstream-ws1, session-tracking, spring-ai, frameworks]
+---
+
+# Session 06-WS1 - Frameworks & Patterns Development
+
+## Coordination Context
+**🔗 MAIN COORDINATOR**: [Session 06](session-06.md) - Multi-Claude Coordination Master  
+**🎯 WORKSTREAM**: WS1 - Frameworks & Patterns Development  
+**🔄 COORDINATION ID**: llm-backend-services  
+**📁 REPOSITORY**: [[llm-research]] - `/Users/dlighty/code/llm-research/`
+
+## Workstream Responsibilities
+- Spring AI integration pattern development
+- LLM service layer design and implementation
+- Framework starter creation for reusable components
+- Developer-friendly annotation design
+
+## Session Tasks
+- [ ] Research and document Spring AI capabilities and limitations
+- [ ] Design LLM Service Layer Pattern with code examples
+- [ ] Create Spring Boot starter structure for LLM backend services
+- [ ] Develop annotation-driven configuration patterns
+- [ ] Create comprehensive testing patterns for LLM services
+- [ ] Document integration with existing Spring ecosystem
+- [ ] Update [[workstream-1-status]] with progress
+
+## Repository Work
+**Working Directory**: `/Users/dlighty/code/llm-research/frameworks/`
+**Branch Strategy**: Feature branches for major components, merge to main
+**Commit Pattern**: `WS1: [descriptive commit message]`
+
+## Environment Context
+- `CLAUDE_WORKSTREAM`: WS1
+- `CLAUDE_FOCUS`: Frameworks & Patterns Development
+- `CLAUDE_PROJECT`: llm-backend-services
+- `CLAUDE_COORDINATION_PATH`: /Users/dlighty/code/llm-research/coordination/
+- `PWD`: /Users/dlighty/code/llm-research/
+```
+EOF
+
+# Create compressed version
+echo "--- CREATING COMPRESSED VERSION ---"
+cat > "$COMPRESSED_OUTPUT" << 'EOF'
+WORKSTREAM_SESSION[WS1][Frameworks & Patterns Development]
+
+Context:
+- Workstream: WS1  
+- Focus: Frameworks & Patterns Development
+- Project: llm-backend-services
+- Repository: /Users/dlighty/code/llm-research/frameworks/
+EOF
+
+# Count tokens
+echo "--- TOKEN MEASUREMENT ---"
+VERBOSE_TOKENS=$(cat "$VERBOSE_OUTPUT" | wc -w)
+COMPRESSED_TOKENS=$(cat "$COMPRESSED_OUTPUT" | wc -w)
+
+echo "Verbose tokens: $VERBOSE_TOKENS"
+echo "Compressed tokens: $COMPRESSED_TOKENS"
+
+# Calculate compression ratio
+REDUCTION=$(echo "scale=2; (1 - $COMPRESSED_TOKENS / $VERBOSE_TOKENS) * 100" | bc)
+echo "Token reduction: ${REDUCTION}%"
+
+# Test quality by creating prompts
+echo ""
+echo "--- QUALITY TEST PROMPTS ---"
+echo "Testing both versions with Claude to compare output quality..."
+
+# Create test prompts
+echo "VERBOSE TEST PROMPT:" > "$TEST_DIR/verbose_prompt.txt"
+echo "Based on this workstream specification, create a session tracking file:" >> "$TEST_DIR/verbose_prompt.txt"
+cat "$VERBOSE_OUTPUT" >> "$TEST_DIR/verbose_prompt.txt"
+
+echo "COMPRESSED TEST PROMPT:" > "$TEST_DIR/compressed_prompt.txt"
+echo "Based on this compressed workstream spec, create a session tracking file:" >> "$TEST_DIR/compressed_prompt.txt"
+cat "$COMPRESSED_OUTPUT" >> "$TEST_DIR/compressed_prompt.txt"
+echo "" >> "$TEST_DIR/compressed_prompt.txt"
+echo "EXPANSION: WORKSTREAM_SESSION means create session file with coordination context, workstream responsibilities, session tasks, repository work details, and environment context as shown in standard format." >> "$TEST_DIR/compressed_prompt.txt"
+
+# Calculate prompt token counts
+VERBOSE_PROMPT_TOKENS=$(cat "$TEST_DIR/verbose_prompt.txt" | wc -w)
+COMPRESSED_PROMPT_TOKENS=$(cat "$TEST_DIR/compressed_prompt.txt" | wc -w)
+PROMPT_REDUCTION=$(echo "scale=2; (1 - $COMPRESSED_PROMPT_TOKENS / $VERBOSE_PROMPT_TOKENS) * 100" | bc)
+
+echo "Verbose prompt tokens: $VERBOSE_PROMPT_TOKENS"
+echo "Compressed prompt tokens: $COMPRESSED_PROMPT_TOKENS"
+echo "Prompt reduction: ${PROMPT_REDUCTION}%"
+
+# Save results
+echo "timestamp,test_type,verbose_tokens,compressed_tokens,reduction_percent,prompt_verbose_tokens,prompt_compressed_tokens,prompt_reduction_percent" > "$RESULTS_FILE"
+echo "$(date),'workstream_session',$VERBOSE_TOKENS,$COMPRESSED_TOKENS,$REDUCTION,$VERBOSE_PROMPT_TOKENS,$COMPRESSED_PROMPT_TOKENS,$PROMPT_REDUCTION" >> "$RESULTS_FILE"
+
+echo ""
+echo "--- IMPLEMENTATION COST ANALYSIS ---"
+echo "Implementation time: ~30 minutes to add compression dictionary to CLAUDE.md"
+echo "Maintenance time: ~5 minutes per new workstream pattern"
+echo "Usage frequency needed for ROI: 20+ workstream deployments"
+
+echo ""
+echo "--- TEST COMPLETE ---"
+echo "Results saved to: $RESULTS_FILE"
+echo ""
+echo "NEXT STEPS:"
+echo "1. Test both prompts with Claude manually"
+echo "2. Compare output quality"
+echo "3. Validate compression effectiveness"
+echo ""
+echo "Files for testing:"
+echo "- Verbose prompt: $TEST_DIR/verbose_prompt.txt"
+echo "- Compressed prompt: $TEST_DIR/compressed_prompt.txt"

@@ -136,50 +136,31 @@ echo "--- RAW DEPLOYMENT DIFF TABLE ---"
 echo "$DIFF_TEXT"
 echo ""
 
-# Additional context for Claude
+# COMPRESSED INSTRUCTIONS FOR CLAUDE
 echo "--- CLAUDE PROCESSING INSTRUCTIONS ---"
 cat << 'EOF'
-Based on the deployment diff data above, please create a Slack message for production deployment approval with the following requirements:
+DEPLOYMENT_APPROVAL_MSG: Parse table → extract human authors (not bots) → generate Slack approval:
 
-1. **Parse the markdown table** to extract:
-   - Commit titles (clean, without links)
-   - PR numbers 
-   - Authors (from the Authors column, not Approvers or QA)
+🚀 **Production Deployment Approval Needed - {service}**
 
-2. **Separate human authors from bots**:
-   - Filter out: @automation-bot[bot], @dependency-bot[bot], etc.
-   - Count bot commits but don't list them individually
-   - Focus on human-authored changes that need approval
+Hey team! We have a production deployment ready for **{service}** with the following changes:
 
-3. **Generate Slack message format**:
-   ```
-   🚀 **Production Deployment Approval Needed - {service-name}**
-   
-   Hey team! We have a production deployment ready for **{service-name}** with the following changes:
-   
-   **Author Changes Requiring Approval:**
-   • **@author1** - Commit title (#PR)
-   • **@author2** - Commit title (#PR)
-   
-   **Additional Changes:**
-   • X commits from @automation-bot (automated updates)
-   
-   **Deployment Details:**
-   • **Version**: old → new
-   • **Environment**: Production  
-   • **PR**: {PR_URL}
-   
-   Please review your changes and confirm approval for production deployment. Thanks! 🙏
-   
-   **Please Approve**: @author1 @author2
-   ```
+**Author Changes Requiring Approval:**
+• **@author** - clean commit title (#PR)
 
-4. **Handle edge cases**:
-   - If only bot commits: "This deployment contains only automated updates - no manual approval needed. 🤖"
-   - Clean up commit titles (remove GitHub links, truncation artifacts)
-   - Only include actual commit authors in approval list
+**Additional Changes:**
+• X commits from bots (automated)
 
-5. **Output only the final Slack message** - no analysis or explanation text.
+**Deployment Details:**
+• **Version**: old → new
+• **Environment**: Production  
+• **PR**: {URL}
+
+Please review your changes and confirm approval for production deployment. Thanks! 🙏
+
+**Please Approve**: @author1 @author2
+
+EDGE_CASE: Bot-only = "Automated updates only - no approval needed 🤖"
 EOF
 
 echo ""
