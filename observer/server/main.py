@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import time
 from contextlib import asynccontextmanager
 from typing import Any
+
+WCLDS = os.path.expanduser("~/code/personal-dev-tools/cli/wclds")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -138,6 +141,16 @@ async def list_events(
 @app.get("/events/filter-options", response_model=FilterOptions)
 async def filter_options() -> dict[str, list[str]]:
     return await get_filter_options()
+
+
+@app.get("/launch-new")
+async def launch_new(cmd: str = Query("")) -> dict[str, Any]:
+    if not cmd:
+        return {"ok": False, "error": "cmd is required"}
+    if not os.path.isfile(WCLDS):
+        return {"ok": False, "error": f"wclds not found at {WCLDS}"}
+    subprocess.Popen([WCLDS, cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "cmd": cmd}
 
 
 @app.get("/launch")

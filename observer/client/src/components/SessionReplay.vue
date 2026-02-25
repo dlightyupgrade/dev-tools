@@ -31,7 +31,7 @@
       <SessionTree :events="allEvents" />
 
       <!-- Right: stats panel -->
-      <div class="w-64 flex-shrink-0 border-l border-gray-800 overflow-y-auto bg-gray-950">
+      <div class="w-80 flex-shrink-0 border-l border-gray-800 overflow-y-auto bg-gray-950">
         <div class="px-4 py-2 border-b border-gray-800 bg-gray-900">
           <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Stats</span>
         </div>

@@ -105,7 +105,6 @@
       <div class="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2">Not tracked</div>
       <div class="space-y-1 text-xs text-gray-700">
         <div>↳ PostToolUse — tool durations & outcomes</div>
-        <div>↳ Read / Write / Edit / Bash — file access</div>
         <div>↳ Subagent-internal tool calls</div>
         <div>↳ Token usage per turn</div>
         <div>↳ Model response / thinking time</div>

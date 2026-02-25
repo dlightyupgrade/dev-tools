@@ -7,7 +7,7 @@
 
     <!-- Turn groups -->
     <div
-      v-for="turn in tree"
+      v-for="turn in displayTree"
       :key="turn.id"
       class="rounded-lg border border-gray-800 overflow-hidden"
     >
@@ -114,6 +114,9 @@ const props = defineProps<{ events: ObserverEvent[] }>()
 
 const eventsRef = computed(() => props.events)
 const { tree, formatMs, formatRel } = useSessionAnalysis(eventsRef)
+
+// Most recent prompt at top
+const displayTree = computed(() => [...tree.value].reverse())
 
 const collapsed = ref(new Set<string>())
 

@@ -227,6 +227,31 @@ export function useSessionAnalysis(eventsRef: Ref<ObserverEvent[]>) {
       }
     }
 
+    // Post-process: pull orphan tools that immediately precede their spawned droid
+    // into that droid's tools list so the whole block collapses together.
+    const SPAWN_WINDOW_MS = 5000
+    for (const turn of turns) {
+      const merged: Array<DroidNode | ToolNode> = []
+      let i = 0
+      while (i < turn.children.length) {
+        const child = turn.children[i]
+        const next = turn.children[i + 1]
+        if (
+          child.type === 'tool' &&
+          next?.type === 'droid' &&
+          next.start_ts - child.event.timestamp <= SPAWN_WINDOW_MS
+        ) {
+          next.tools.unshift(child)
+          merged.push(next)
+          i += 2
+        } else {
+          merged.push(child)
+          i++
+        }
+      }
+      turn.children = merged
+    }
+
     return turns
   })
 
