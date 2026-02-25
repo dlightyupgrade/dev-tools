@@ -43,6 +43,9 @@ export interface SessionStats {
   mcp_services: Array<{ name: string; count: number }>
   skill_count: number
   task_count: number
+  bash_count: number
+  web_count: number
+  file_ops: Array<{ name: string; count: number }>
   total_tool_calls: number
   total_droid_ms: number
   parallelism: number
@@ -51,6 +54,23 @@ export interface SessionStats {
 // ── Tool label extraction ────────────────────────────────────────────────────
 
 function toolLabel(tool_name: string, input: Record<string, unknown>): { label: string; sublabel: string } {
+  // Standard Claude Code tools
+  const fp = (input.file_path as string) ?? ''
+  const filename = fp ? fp.split('/').pop() ?? fp : ''
+  if (tool_name === 'Read')      return { label: `Read ${filename}`, sublabel: fp }
+  if (tool_name === 'Write')     return { label: `Write ${filename}`, sublabel: fp }
+  if (tool_name === 'Edit')      return { label: `Edit ${filename}`, sublabel: fp }
+  if (tool_name === 'Glob')      return { label: `Glob`, sublabel: (input.pattern as string) ?? '' }
+  if (tool_name === 'Grep')      return { label: `Grep ${(input.pattern as string) ?? ''}`, sublabel: (input.path as string) ?? '' }
+  if (tool_name === 'Bash') {
+    const desc = (input.description as string) ?? ''
+    const cmd = (input.command as string) ?? ''
+    return { label: `Bash`, sublabel: desc || cmd.slice(0, 100) }
+  }
+  if (tool_name === 'WebFetch')  return { label: `Fetch`, sublabel: (input.url as string) ?? '' }
+  if (tool_name === 'WebSearch') return { label: `Search`, sublabel: (input.query as string) ?? '' }
+  if (tool_name === 'NotebookEdit') return { label: `NotebookEdit`, sublabel: (input.notebook_path as string) ?? '' }
+
   if (tool_name === 'Task') {
     const desc = (input.description as string) ?? (input.subagent_type as string) ?? 'Task'
     const prompt = (input.prompt as string) ?? ''
@@ -105,10 +125,14 @@ function toolLabel(tool_name: string, input: Record<string, unknown>): { label: 
 function toolColor(tool_name: string): string {
   if (tool_name === 'Skill') return '#A855F7'
   if (tool_name === 'Task') return '#F59E0B'
+  if (tool_name === 'Bash') return '#34D399'
+  if (tool_name === 'WebFetch' || tool_name === 'WebSearch') return '#60A5FA'
+  if (tool_name === 'Read' || tool_name === 'Write' || tool_name === 'Edit') return '#9CA3AF'
+  if (tool_name === 'Glob' || tool_name === 'Grep') return '#6B7280'
   if (tool_name.startsWith('mcp__atlassian')) return '#06B6D4'
   if (tool_name.startsWith('mcp__redshift')) return '#10B981'
   if (tool_name.startsWith('mcp__')) return '#67E8F9'
-  return '#6B7280'
+  return '#4B5563'
 }
 
 // ── Main composable ──────────────────────────────────────────────────────────
@@ -210,9 +234,13 @@ export function useSessionAnalysis(eventsRef: Ref<ObserverEvent[]>) {
   const stats = computed((): SessionStats => {
     const droidMap: Record<string, { color: string; emoji: string; count: number; total_ms: number }> = {}
     const mcpMap: Record<string, number> = {}
+    const fileOpMap: Record<string, number> = {}
     let skillCount = 0
     let taskCount = 0
+    let bashCount = 0
+    let webCount = 0
     let totalTools = 0
+    const FILE_OPS = new Set(['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'])
 
     function walkTools(tools: ToolNode[]) {
       for (const t of tools) {
@@ -220,7 +248,11 @@ export function useSessionAnalysis(eventsRef: Ref<ObserverEvent[]>) {
         const name = t.event.tool_name
         if (name === 'Skill') skillCount++
         else if (name === 'Task') taskCount++
-        else if (name.startsWith('mcp__')) {
+        else if (name === 'Bash') bashCount++
+        else if (name === 'WebFetch' || name === 'WebSearch') webCount++
+        else if (FILE_OPS.has(name)) {
+          fileOpMap[name] = (fileOpMap[name] ?? 0) + 1
+        } else if (name.startsWith('mcp__')) {
           const svc = name.split('__')[1] ?? 'unknown'
           mcpMap[svc] = (mcpMap[svc] ?? 0) + 1
         }
@@ -259,6 +291,9 @@ export function useSessionAnalysis(eventsRef: Ref<ObserverEvent[]>) {
       mcp_services: Object.entries(mcpMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
       skill_count: skillCount,
       task_count: taskCount,
+      bash_count: bashCount,
+      web_count: webCount,
+      file_ops: Object.entries(fileOpMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
       total_tool_calls: totalTools,
       total_droid_ms: totalDroidMs,
       parallelism: durationMs.value > 0 ? totalDroidMs / durationMs.value : 0,

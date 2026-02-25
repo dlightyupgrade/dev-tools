@@ -67,10 +67,21 @@
         <span class="text-xs text-amber-400">⬡ Task</span>
         <span class="text-xs font-mono text-gray-400">{{ stats.task_count }}</span>
       </div>
-
       <div v-if="stats.skill_count" class="flex items-center justify-between py-1 border-b border-gray-800/60">
         <span class="text-xs text-purple-400">⚡ Skill</span>
         <span class="text-xs font-mono text-gray-400">{{ stats.skill_count }}</span>
+      </div>
+      <div v-if="stats.bash_count" class="flex items-center justify-between py-1 border-b border-gray-800/60">
+        <span class="text-xs text-green-400">$ Bash</span>
+        <span class="text-xs font-mono text-gray-400">{{ stats.bash_count }}</span>
+      </div>
+      <div v-if="stats.web_count" class="flex items-center justify-between py-1 border-b border-gray-800/60">
+        <span class="text-xs text-blue-400">🌐 Web</span>
+        <span class="text-xs font-mono text-gray-400">{{ stats.web_count }}</span>
+      </div>
+      <div v-for="op in stats.file_ops" :key="op.name" class="flex items-center justify-between py-1 border-b border-gray-800/60">
+        <span class="text-xs text-gray-400">{{ fileOpIcon(op.name) }} {{ op.name }}</span>
+        <span class="text-xs font-mono text-gray-400">{{ op.count }}</span>
       </div>
 
       <div
@@ -113,4 +124,9 @@ const props = defineProps<{ events: ObserverEvent[] }>()
 
 const eventsRef = computed(() => props.events)
 const { stats, formatMs } = useSessionAnalysis(eventsRef)
+
+function fileOpIcon(name: string): string {
+  const icons: Record<string, string> = { Read: '📄', Write: '💾', Edit: '✏️', Glob: '🔎', Grep: '🔍', NotebookEdit: '📓' }
+  return icons[name] ?? '▸'
+}
 </script>

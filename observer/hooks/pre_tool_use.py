@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hook: PreToolUse — capture Skill invocations and MCP tool calls."""
+"""Hook: PreToolUse — capture all tool calls."""
 from __future__ import annotations
 
 import json
@@ -14,14 +14,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 SERVER_URL = os.environ.get("OBSERVER_SERVER_URL", "http://localhost:4001")
 CONTEXT_FILE = Path.home() / ".claude" / "observer-context.json"
 TIMEOUT = 3
-
-# Only capture these tool categories — ignore Read/Write/Edit/Bash/Glob/Grep etc.
-def is_interesting(tool_name: str) -> bool:
-    return (
-        tool_name == "Skill"
-        or tool_name == "Task"
-        or tool_name.startswith("mcp__")
-    )
 
 
 def read_context(session_id: str) -> dict[str, str]:
@@ -58,17 +50,11 @@ def main() -> None:
         return
 
     tool_name: str = hook_data.get("tool_name", hook_data.get("toolName", ""))
-    if not is_interesting(tool_name):
-        return
-
     session_id = hook_data.get("session_id", hook_data.get("sessionId", ""))
     ctx = read_context(session_id)
     tool_input: dict = hook_data.get("tool_input", hook_data.get("toolInput", {}))
 
-    # For Skill calls, extract the skill name from input
-    invoked_skill = ""
-    if tool_name == "Skill":
-        invoked_skill = tool_input.get("skill", "")
+    invoked_skill = tool_input.get("skill", "") if tool_name == "Skill" else ""
 
     payload: dict = {"tool_input": tool_input}
     if invoked_skill:

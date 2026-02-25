@@ -16,6 +16,12 @@
         </span>
       </div>
       <span class="text-xs text-gray-500 flex-shrink-0">{{ allEvents.length }} events · {{ formatMs(durationMs) }}</span>
+      <button
+        class="flex-shrink-0 text-xs text-indigo-400 hover:text-indigo-300 font-mono px-2 py-1 rounded border border-indigo-800 hover:border-indigo-600 transition-colors"
+        @click="resume"
+      >
+        ↩ Resume
+      </button>
     </div>
 
     <!-- Main layout: tree + stats -->
@@ -55,4 +61,8 @@ const summary = computed(() => sessionSummaries.value.find(s => s.session_id ===
 
 const eventsRef = allEvents
 const { durationMs, formatMs } = useSessionAnalysis(eventsRef)
+
+async function resume() {
+  await fetch(`http://localhost:4001/launch?session_id=${props.sessionId}`)
+}
 </script>

@@ -8,6 +8,7 @@ export interface SessionSummary {
   end_ts: number
   is_active: boolean
   dominant_color: string
+  first_prompt: string
 }
 
 export interface ObserverEvent {

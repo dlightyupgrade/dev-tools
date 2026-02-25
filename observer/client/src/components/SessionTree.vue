@@ -125,9 +125,17 @@ function toggle(id: string) {
 }
 
 function toolIcon(tool_name: string): string {
-  if (tool_name === 'Skill') return '⚡'
-  if (tool_name === 'Task') return '⬡'
-  if (tool_name.includes('search')) return '🔍'
+  if (tool_name === 'Skill')     return '⚡'
+  if (tool_name === 'Task')      return '⬡'
+  if (tool_name === 'Read')      return '📄'
+  if (tool_name === 'Write')     return '💾'
+  if (tool_name === 'Edit')      return '✏️'
+  if (tool_name === 'Bash')      return '$'
+  if (tool_name === 'Glob')      return '🔎'
+  if (tool_name === 'Grep')      return '🔍'
+  if (tool_name === 'WebFetch')  return '🌐'
+  if (tool_name === 'WebSearch') return '🔍'
+  if (tool_name.includes('search') || tool_name.includes('Search')) return '🔍'
   if (tool_name.includes('update') || tool_name.includes('Update')) return '✏️'
   if (tool_name.includes('create') || tool_name.includes('Create')) return '✨'
   if (tool_name.includes('get') || tool_name.includes('Get')) return '📥'

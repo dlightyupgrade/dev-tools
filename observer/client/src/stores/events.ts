@@ -92,6 +92,9 @@ export const useEventsStore = defineStore('events', () => {
       const dominant_color = droids[0]?.color ?? '#4B5563'
       const is_active = (now - end_ts) < TEN_MINUTES
 
+      const firstPromptEvent = sorted.find(e => e.hook_event_type === 'UserPromptSubmit')
+      const first_prompt = (firstPromptEvent?.payload?.prompt_preview as string) ?? ''
+
       return {
         session_id,
         event_count: sorted.length,
@@ -102,6 +105,7 @@ export const useEventsStore = defineStore('events', () => {
         end_ts,
         is_active,
         dominant_color,
+        first_prompt,
       }
     }).sort((a, b) => {
       if (a.is_active !== b.is_active) return a.is_active ? -1 : 1

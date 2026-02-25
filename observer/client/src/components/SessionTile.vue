@@ -26,7 +26,7 @@
     </div>
 
     <!-- Skill + ticket row -->
-    <div class="flex items-center gap-2 mb-3 min-h-[1.25rem]">
+    <div class="flex items-center gap-2 mb-1.5 min-h-[1.25rem]">
       <span v-if="summary.skill_name" class="text-xs text-purple-400 font-mono">
         ⚡ /{{ summary.skill_name }}
       </span>
@@ -35,6 +35,13 @@
       </span>
       <span v-if="!summary.skill_name && !summary.ticket_id" class="text-xs text-gray-600 italic">
         no mission
+      </span>
+    </div>
+
+    <!-- First prompt preview -->
+    <div class="mb-3 min-h-[1.25rem]">
+      <span v-if="summary.first_prompt" class="text-xs text-gray-500 leading-snug line-clamp-2">
+        {{ summary.first_prompt }}
       </span>
     </div>
 
