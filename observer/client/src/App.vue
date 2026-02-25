@@ -2,6 +2,11 @@
   <div class="h-screen flex flex-col bg-gray-950 font-sans overflow-hidden">
     <!-- Persistent header -->
     <header class="flex items-center gap-3 px-4 border-b border-gray-800 bg-gray-900 flex-shrink-0">
+      <!-- Logo -->
+      <div class="flex items-center gap-2 flex-shrink-0 pr-3 border-r border-gray-800">
+        <div class="w-7 h-7 bg-gray-100 rounded-md flex items-center justify-center text-base text-gray-900 font-bold select-none">⌥</div>
+      </div>
+
       <!-- Back button (session detail only) -->
       <button
         v-if="selectedSessionId"
@@ -29,15 +34,24 @@
         </button>
       </div>
 
+      <!-- MissionHeader fills remaining space -->
       <MissionHeader :connected="connected" />
 
-      <!-- Launch button -->
-      <button
-        class="flex-shrink-0 ml-2 flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
-        @click="showLaunch = true"
-      >
-        ⚡ New
-      </button>
+      <!-- Right-side controls -->
+      <div class="flex items-center gap-2 ml-auto flex-shrink-0">
+        <ServerStatus :connected="connected" />
+
+        <button
+          class="text-xs px-2 py-1.5 rounded border border-gray-700 text-gray-400 hover:text-white hover:border-gray-600 transition-colors"
+          :title="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
+          @click="toggleTheme"
+        >{{ isDark ? '☀️' : '🌙' }}</button>
+
+        <button
+          class="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+          @click="showLaunch = true"
+        >⚡ New</button>
+      </div>
     </header>
 
     <!-- Launch modal -->
@@ -71,6 +85,7 @@ import SessionGrid from './components/SessionGrid.vue'
 import SessionReplay from './components/SessionReplay.vue'
 import InsightsPanel from './components/InsightsPanel.vue'
 import LaunchModal from './components/LaunchModal.vue'
+import ServerStatus from './components/ServerStatus.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useEventsStore } from './stores/events'
 
@@ -80,6 +95,25 @@ const store = useEventsStore()
 const view = ref<'sessions' | 'insights'>('insights')
 const selectedSessionId = ref<string | null>(null)
 const showLaunch = ref(false)
+
+const isDark = ref(localStorage.getItem('observer-theme') !== 'light')
+
+function applyTheme() {
+  if (isDark.value) {
+    document.documentElement.classList.remove('theme-light')
+  } else {
+    document.documentElement.classList.add('theme-light')
+  }
+}
+
+function toggleTheme() {
+  isDark.value = !isDark.value
+  localStorage.setItem('observer-theme', isDark.value ? 'dark' : 'light')
+  applyTheme()
+}
+
+// Apply on mount
+applyTheme()
 
 function goToSession(id: string) {
   view.value = 'sessions'

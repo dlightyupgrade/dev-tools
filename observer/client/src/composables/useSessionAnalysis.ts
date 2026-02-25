@@ -12,6 +12,7 @@ export interface ToolNode {
   sublabel: string
   color: string
   relTimeSec: number
+  copyText?: string  // full content for copy (e.g. SQL query)
 }
 
 export interface DroidNode {
@@ -70,6 +71,14 @@ function toolLabel(tool_name: string, input: Record<string, unknown>): { label: 
   if (tool_name === 'WebFetch')  return { label: `Fetch`, sublabel: (input.url as string) ?? '' }
   if (tool_name === 'WebSearch') return { label: `Search`, sublabel: (input.query as string) ?? '' }
   if (tool_name === 'NotebookEdit') return { label: `NotebookEdit`, sublabel: (input.notebook_path as string) ?? '' }
+
+  if (tool_name === 'mcp__redshift__query_redshift') {
+    const query = (input.query as string) ?? ''
+    const firstLine = query.split('\n')[0].trim()
+    return { label: 'Query Redshift', sublabel: firstLine.slice(0, 80) }
+  }
+  if (tool_name === 'mcp__redshift__get_connection_status') return { label: 'Redshift connection status', sublabel: '' }
+  if (tool_name === 'mcp__redshift__reconnect_database') return { label: 'Reconnect Redshift', sublabel: '' }
 
   if (tool_name === 'Task') {
     const desc = (input.description as string) ?? (input.subagent_type as string) ?? 'Task'
@@ -208,6 +217,11 @@ export function useSessionAnalysis(eventsRef: Ref<ObserverEvent[]>) {
       } else if (e.hook_event_type === 'PreToolUse') {
         const input = ((e.payload as Record<string, unknown>)?.tool_input as Record<string, unknown>) ?? {}
         const { label, sublabel } = toolLabel(e.tool_name, input)
+        const copyText = e.tool_name === 'mcp__redshift__query_redshift'
+          ? (input.query as string) ?? undefined
+          : e.tool_name === 'Bash'
+          ? ((input.command as string) ?? undefined)
+          : undefined
         const toolNode: ToolNode = {
           type: 'tool',
           id,
@@ -216,6 +230,7 @@ export function useSessionAnalysis(eventsRef: Ref<ObserverEvent[]>) {
           sublabel,
           color: toolColor(e.tool_name),
           relTimeSec,
+          copyText,
         }
 
         // Attach to innermost active droid or current turn

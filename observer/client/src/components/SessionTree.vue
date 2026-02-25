@@ -74,6 +74,16 @@
                   <span v-if="tool.sublabel" class="text-xs text-gray-600 ml-2 truncate block">
                     {{ tool.sublabel }}
                   </span>
+                  <!-- Expandable copy block for SQL/Bash -->
+                  <div v-if="tool.copyText" class="mt-1.5">
+                    <pre class="text-xs text-gray-400 bg-gray-800/60 rounded p-2 whitespace-pre-wrap break-all font-mono leading-relaxed max-h-32 overflow-y-auto">{{ tool.copyText }}</pre>
+                    <button
+                      class="mt-1 text-xs text-gray-600 hover:text-indigo-400 transition-colors"
+                      @click.stop="copy(tool.copyText!, tool.id)"
+                    >
+                      {{ copied === tool.id ? '✓ Copied' : '⎘ Copy' }}
+                    </button>
+                  </div>
                 </div>
                 <span class="text-xs text-gray-700 font-mono flex-shrink-0">{{ formatRel(tool.relTimeSec) }}</span>
               </div>
@@ -84,7 +94,7 @@
           <div
             v-else-if="child.type === 'tool'"
             class="flex items-start gap-3 px-4 py-2 border-t border-gray-800/60 hover:bg-gray-800/20 transition-colors"
-            style="border-left: 3px solid #374151; padding-left: 2rem"
+            style="border-left: 3px solid #e2e8f0; padding-left: 2rem"
           >
             <span class="flex-shrink-0 mt-0.5 text-xs" :style="{ color: (child as ToolNode).color }">
               {{ toolIcon((child as ToolNode).event.tool_name) }}
@@ -96,6 +106,15 @@
               <span v-if="(child as ToolNode).sublabel" class="text-xs text-gray-600 ml-2 truncate block">
                 {{ (child as ToolNode).sublabel }}
               </span>
+              <div v-if="(child as ToolNode).copyText" class="mt-1.5">
+                <pre class="text-xs text-gray-400 bg-gray-800/60 rounded p-2 whitespace-pre-wrap break-all font-mono leading-relaxed max-h-32 overflow-y-auto">{{ (child as ToolNode).copyText }}</pre>
+                <button
+                  class="mt-1 text-xs text-gray-600 hover:text-indigo-400 transition-colors"
+                  @click.stop="copy((child as ToolNode).copyText!, child.id)"
+                >
+                  {{ copied === child.id ? '✓ Copied' : '⎘ Copy' }}
+                </button>
+              </div>
             </div>
             <span class="text-xs text-gray-700 font-mono flex-shrink-0">{{ formatRel((child as ToolNode).relTimeSec) }}</span>
           </div>
@@ -106,7 +125,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { ObserverEvent } from '../types/events'
 import { useSessionAnalysis, type TurnNode, type ToolNode } from '../composables/useSessionAnalysis'
 
@@ -119,6 +138,16 @@ const { tree, formatMs, formatRel } = useSessionAnalysis(eventsRef)
 const displayTree = computed(() => [...tree.value].reverse())
 
 const collapsed = ref(new Set<string>())
+const copied = ref<string | null>(null)
+
+function copy(text: string, id?: string) {
+  navigator.clipboard.writeText(text)
+  if (id) copied.value = id
+}
+
+watch(copied, (val) => {
+  if (val) setTimeout(() => { copied.value = null }, 1500)
+})
 
 function toggle(id: string) {
   if (collapsed.value.has(id)) collapsed.value.delete(id)

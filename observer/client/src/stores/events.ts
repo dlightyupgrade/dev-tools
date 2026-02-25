@@ -171,6 +171,11 @@ export const useEventsStore = defineStore('events', () => {
     filterOptions.value = { sessions: [], droids: [], skills: [], event_types: [] }
   }
 
+  async function deleteSession(sessionId: string) {
+    await fetch(`${SERVER}/events/session/${sessionId}`, { method: 'DELETE' })
+    events.value = events.value.filter(e => e.session_id !== sessionId)
+  }
+
   return {
     events,
     filteredEvents,
@@ -189,5 +194,6 @@ export const useEventsStore = defineStore('events', () => {
     clearEvents,
     sessionSummaries,
     getSessionEvents,
+    deleteSession,
   }
 })

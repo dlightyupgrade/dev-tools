@@ -131,6 +131,19 @@ async def get_filter_options() -> dict[str, list[str]]:
     }
 
 
+async def delete_session_events(session_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+        await db.commit()
+
+
+async def get_event_count() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM events") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
 async def reset_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM events")

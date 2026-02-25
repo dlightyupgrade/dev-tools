@@ -6,10 +6,10 @@
       class="overflow-visible"
     >
       <!-- Background -->
-      <rect x="0" y="0" width="240" rx="3" :height="svgHeight" fill="#111827" />
+      <rect x="0" y="0" width="240" rx="3" :height="svgHeight" fill="#f1f5f9" />
 
       <!-- Axis line -->
-      <line x1="0" :y1="AXIS_Y" x2="240" :y2="AXIS_Y" stroke="#374151" stroke-width="0.5" />
+      <line x1="0" :y1="AXIS_Y" x2="240" :y2="AXIS_Y" stroke="#cbd5e1" stroke-width="0.5" />
 
       <!-- Prompt markers -->
       <g v-for="(pm, i) in promptMarkers" :key="`pm-${i}`">
@@ -50,8 +50,8 @@
       </g>
 
       <!-- Time labels at start and end -->
-      <text x="2" :y="svgHeight - 1" fill="#4B5563" font-size="5">0s</text>
-      <text :x="238" :y="svgHeight - 1" fill="#4B5563" font-size="5" text-anchor="end">
+      <text x="2" :y="svgHeight - 1" fill="#94a3b8" font-size="5">0s</text>
+      <text :x="238" :y="svgHeight - 1" fill="#94a3b8" font-size="5" text-anchor="end">
         {{ formatMs(durationMs) }}
       </text>
     </svg>

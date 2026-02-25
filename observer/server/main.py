@@ -12,17 +12,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import time
 from contextlib import asynccontextmanager
 from typing import Any
+
+SERVER_START_TIME = time.time()
 
 WCLDS = os.path.expanduser("~/code/personal-dev-tools/cli/wclds")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from db import init_db, insert_event, query_events, get_filter_options, reset_db
+from db import init_db, insert_event, query_events, get_filter_options, reset_db, delete_session_events
 from droids import resolve_droid
 from models import IncomingEvent, StoredEvent, FilterOptions
 
@@ -91,6 +94,30 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "clients": str(manager.count)}
+
+
+@app.get("/status")
+async def status() -> dict[str, Any]:
+    from db import get_event_count
+    uptime_s = int(time.time() - SERVER_START_TIME)
+    h, m, s = uptime_s // 3600, (uptime_s % 3600) // 60, uptime_s % 60
+    return {
+        "status": "ok",
+        "uptime": f"{h:02d}:{m:02d}:{s:02d}",
+        "uptime_s": uptime_s,
+        "clients": manager.count,
+        "event_count": await get_event_count(),
+        "port": 4001,
+    }
+
+
+@app.post("/shutdown")
+async def shutdown() -> dict[str, str]:
+    async def _kill():
+        await asyncio.sleep(0.2)
+        os.kill(os.getpid(), signal.SIGTERM)
+    asyncio.create_task(_kill())
+    return {"status": "shutting down"}
 
 
 @app.post("/events", response_model=StoredEvent)
@@ -171,6 +198,12 @@ end tell
 """
     subprocess.Popen(["osascript", "-e", script])
     return {"ok": True, "session_id": session_id}
+
+
+@app.delete("/events/session/{session_id}")
+async def delete_session(session_id: str) -> dict[str, str]:
+    await delete_session_events(session_id)
+    return {"status": "deleted", "session_id": session_id}
 
 
 @app.delete("/events")

@@ -94,11 +94,23 @@
       </div>
     </div>
 
-    <!-- Session timeline minimap -->
+    <!-- Session timeline minimap (click to expand) -->
     <div v-if="stats.droid_rows.length">
-      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Timeline</div>
-      <SessionMinimap :events="events" :duration-ms="stats.duration_ms" />
+      <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center justify-between">
+        <span>Timeline</span>
+        <span class="text-gray-700 font-normal normal-case tracking-normal">click to expand</span>
+      </div>
+      <div class="cursor-pointer hover:opacity-80 transition-opacity" @click="showTimeline = true">
+        <SessionMinimap :events="events" :duration-ms="stats.duration_ms" />
+      </div>
     </div>
+
+    <TimelineModal
+      v-if="showTimeline"
+      :events="events"
+      :duration-ms="stats.duration_ms"
+      @close="showTimeline = false"
+    />
 
     <!-- Not tracked -->
     <div class="border-t border-gray-800 pt-4">
@@ -114,15 +126,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { ObserverEvent } from '../types/events'
 import { useSessionAnalysis } from '../composables/useSessionAnalysis'
 import SessionMinimap from './SessionMinimap.vue'
+import TimelineModal from './TimelineModal.vue'
 
 const props = defineProps<{ events: ObserverEvent[] }>()
 
 const eventsRef = computed(() => props.events)
 const { stats, formatMs } = useSessionAnalysis(eventsRef)
+
+const showTimeline = ref(false)
 
 function fileOpIcon(name: string): string {
   const icons: Record<string, string> = { Read: '📄', Write: '💾', Edit: '✏️', Glob: '🔎', Grep: '🔍', NotebookEdit: '📓' }
