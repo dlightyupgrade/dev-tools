@@ -99,15 +99,32 @@ export function useInsights() {
     }))
   })
 
-  // ── Activity by hour ───────────────────────────────────────────────────────
+  // ── Activity by day (last 14 days) ────────────────────────────────────────
 
-  const activityByHour = computed(() => {
-    const hours = Array(24).fill(0) as number[]
-    for (const sess of sessionSummaries.value) {
-      hours[new Date(sess.start_ts).getHours()]++
+  const activityByDay = computed(() => {
+    const days: { date: string; label: string; count: number; durationMs: number }[] = []
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(today)
+      d.setDate(d.getDate() - i)
+      const key = d.toISOString().slice(0, 10)
+      const label = i === 0 ? 'Today' : i === 1 ? 'Yest' : d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' })
+      days.push({ date: key, label, count: 0, durationMs: 0 })
     }
-    const max = Math.max(...hours, 1)
-    return hours.map((count, h) => ({ h, count, pct: (count / max) * 100 }))
+
+    for (const sess of sessionSummaries.value) {
+      const key = new Date(sess.start_ts).toISOString().slice(0, 10)
+      const day = days.find(d => d.date === key)
+      if (day) {
+        day.count++
+        day.durationMs += Math.max(sess.end_ts - sess.start_ts, 0)
+      }
+    }
+
+    const maxCount = Math.max(...days.map(d => d.count), 1)
+    return days.map(d => ({ ...d, intensity: d.count / maxCount }))
   })
 
   // ── Ticket leaderboard ────────────────────────────────────────────────────
@@ -153,7 +170,7 @@ export function useInsights() {
     droidLeaderboard,
     skillFrequency,
     toolBreakdown,
-    activityByHour,
+    activityByDay,
     ticketLeaderboard,
     topSessionsByEvents,
     topSessionsByDuration,

@@ -50,7 +50,7 @@
         <button
           class="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
           @click="showLaunch = true"
-        >⚡ New</button>
+        >⚡ New <span class="opacity-60 font-normal text-xs ml-1">⌘K</span></button>
       </div>
     </header>
 
@@ -79,7 +79,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import MissionHeader from './components/MissionHeader.vue'
 import SessionGrid from './components/SessionGrid.vue'
 import SessionReplay from './components/SessionReplay.vue'
@@ -120,10 +120,23 @@ function goToSession(id: string) {
   selectedSessionId.value = id
 }
 
+function onKeydown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault()
+    showLaunch.value = !showLaunch.value
+  }
+  if (e.key === 'Escape' && showLaunch.value) {
+    showLaunch.value = false
+  }
+}
+
 onMounted(async () => {
   await store.fetchEvents()
   await store.fetchFilterOptions()
+  document.addEventListener('keydown', onKeydown)
 })
+
+onUnmounted(() => document.removeEventListener('keydown', onKeydown))
 </script>
 
 <style scoped>

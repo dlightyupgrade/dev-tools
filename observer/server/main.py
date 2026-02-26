@@ -12,8 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import signal
 import subprocess
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -174,9 +176,27 @@ async def filter_options() -> dict[str, list[str]]:
 async def launch_new(cmd: str = Query("")) -> dict[str, Any]:
     if not cmd:
         return {"ok": False, "error": "cmd is required"}
-    if not os.path.isfile(WCLDS):
-        return {"ok": False, "error": f"wclds not found at {WCLDS}"}
-    subprocess.Popen([WCLDS, cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Write prompt to a temp script to safely handle newlines, quotes, backslashes
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False)
+    tmp.write("#!/bin/bash\n")
+    tmp.write(f"claude {shlex.quote(cmd)}\n")
+    tmp.close()
+    os.chmod(tmp.name, 0o755)
+
+    script = f"""
+tell application "iTerm2"
+    activate
+    tell current window
+        create tab with default profile
+        set s to current session of current tab
+        tell s
+            write text "{tmp.name}"
+        end tell
+    end tell
+end tell
+"""
+    subprocess.Popen(["osascript", "-e", script])
     return {"ok": True, "cmd": cmd}
 
 

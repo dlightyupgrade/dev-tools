@@ -95,33 +95,36 @@
 
       </div>
 
-      <!-- Activity by hour heatmap -->
+      <!-- Activity by day (last 14 days) -->
       <section>
-        <h2 class="section-heading">Activity by Hour</h2>
-        <div class="flex items-end gap-1 h-16">
+        <h2 class="section-heading">Activity — Last 14 Days</h2>
+        <div class="flex items-end gap-1.5">
           <div
-            v-for="h in activityByHour"
-            :key="h.h"
-            class="flex-1 flex flex-col items-center gap-1 group"
+            v-for="day in activityByDay"
+            :key="day.date"
+            class="flex-1 flex flex-col items-center gap-1.5"
+            :title="`${day.date}: ${day.count} session${day.count !== 1 ? 's' : ''}${day.durationMs ? ' · ' + formatMs(day.durationMs) : ''}`"
           >
             <div
-              class="w-full rounded-sm transition-all"
-              :class="h.count > 0 ? 'bg-indigo-500' : 'bg-gray-800'"
-              :style="{ height: Math.max(h.pct * 0.52, h.count > 0 ? 4 : 2) + 'px', opacity: h.count > 0 ? 0.4 + h.pct * 0.006 : 1 }"
-              :title="`${h.h}:00 — ${h.count} session${h.count !== 1 ? 's' : ''}`"
+              class="w-full rounded"
+              :style="{
+                height: '40px',
+                backgroundColor: day.count > 0
+                  ? `rgba(99,102,241,${0.2 + day.intensity * 0.8})`
+                  : 'rgba(255,255,255,0.04)',
+                border: day.count > 0 ? `1px solid rgba(129,140,248,${0.2 + day.intensity * 0.5})` : '1px solid rgba(255,255,255,0.06)'
+              }"
             />
+            <span
+              class="text-xs font-mono leading-none"
+              :class="day.count > 0 ? 'text-gray-400' : 'text-gray-700'"
+              style="font-size: 9px; white-space: nowrap"
+            >{{ day.count > 0 ? day.count : '·' }}</span>
           </div>
         </div>
-        <div class="flex items-center mt-1">
-          <span class="text-xs text-gray-700">12am</span>
-          <div class="flex-1" />
-          <span class="text-xs text-gray-700">6am</span>
-          <div class="flex-1" />
-          <span class="text-xs text-gray-700">12pm</span>
-          <div class="flex-1" />
-          <span class="text-xs text-gray-700">6pm</span>
-          <div class="flex-1" />
-          <span class="text-xs text-gray-700">11pm</span>
+        <div class="flex items-center justify-between mt-1">
+          <span class="text-xs text-gray-700">{{ activityByDay[0]?.date }}</span>
+          <span class="text-xs text-gray-700">Today</span>
         </div>
       </section>
 
@@ -187,7 +190,7 @@ import { useInsights } from '../composables/useInsights'
 
 defineEmits<{ select: [sessionId: string] }>()
 
-const { overview, droidLeaderboard, skillFrequency, toolBreakdown, activityByHour, ticketLeaderboard, topSessionsByEvents, topSessionsByDuration, formatMs } = useInsights()
+const { overview, droidLeaderboard, skillFrequency, toolBreakdown, activityByDay, ticketLeaderboard, topSessionsByEvents, topSessionsByDuration, formatMs } = useInsights()
 </script>
 
 <style scoped>

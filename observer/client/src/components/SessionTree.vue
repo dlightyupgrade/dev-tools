@@ -18,8 +18,9 @@
       >
         <span class="text-indigo-400 text-sm flex-shrink-0 font-mono mt-0.5">💬</span>
         <div class="flex-1 min-w-0">
-          <div class="text-sm text-gray-200 font-medium leading-snug truncate">
-            {{ turn.promptPreview || '(no preview)' }}
+          <div class="text-sm text-gray-200 font-medium leading-snug">
+            <TextWithLinks v-if="turn.promptPreview" :text="turn.promptPreview" />
+            <span v-else class="text-gray-600">(no preview)</span>
           </div>
         </div>
         <div class="flex items-center gap-3 flex-shrink-0">
@@ -71,18 +72,23 @@
                 <!-- Tool label -->
                 <div class="flex-1 min-w-0">
                   <span class="text-xs font-mono" :style="{ color: tool.color }">{{ tool.label }}</span>
-                  <span v-if="tool.sublabel" class="text-xs text-gray-600 ml-2 truncate block">
-                    {{ tool.sublabel }}
+                  <span v-if="tool.sublabel" class="text-xs text-gray-600 ml-2">
+                    <TextWithLinks :text="tool.sublabel" />
                   </span>
-                  <!-- Expandable copy block for SQL/Bash -->
+                  <!-- Expandable copy/run block for SQL/Bash -->
                   <div v-if="tool.copyText" class="mt-1.5">
                     <pre class="text-xs text-gray-400 bg-gray-800/60 rounded p-2 whitespace-pre-wrap break-all font-mono leading-relaxed max-h-32 overflow-y-auto">{{ tool.copyText }}</pre>
-                    <button
-                      class="mt-1 text-xs text-gray-600 hover:text-indigo-400 transition-colors"
-                      @click.stop="copy(tool.copyText!, tool.id)"
-                    >
-                      {{ copied === tool.id ? '✓ Copied' : '⎘ Copy' }}
-                    </button>
+                    <div class="flex items-center gap-3 mt-1">
+                      <button
+                        class="text-xs text-gray-600 hover:text-indigo-400 transition-colors"
+                        @click.stop="copy(tool.copyText!, tool.id)"
+                      >{{ copied === tool.id ? '✓ Copied' : '⎘ Copy' }}</button>
+                      <button
+                        v-if="tool.event.tool_name === 'mcp__redshift__query_redshift'"
+                        class="text-xs text-green-600 hover:text-green-400 transition-colors font-semibold"
+                        @click.stop="runQuery(tool.copyText!)"
+                      >⚡ Run now</button>
+                    </div>
                   </div>
                 </div>
                 <span class="text-xs text-gray-700 font-mono flex-shrink-0">{{ formatRel(tool.relTimeSec) }}</span>
@@ -103,17 +109,22 @@
               <span class="text-xs font-mono" :style="{ color: (child as ToolNode).color }">
                 {{ (child as ToolNode).label }}
               </span>
-              <span v-if="(child as ToolNode).sublabel" class="text-xs text-gray-600 ml-2 truncate block">
-                {{ (child as ToolNode).sublabel }}
+              <span v-if="(child as ToolNode).sublabel" class="text-xs text-gray-600 ml-2">
+                <TextWithLinks :text="(child as ToolNode).sublabel" />
               </span>
               <div v-if="(child as ToolNode).copyText" class="mt-1.5">
                 <pre class="text-xs text-gray-400 bg-gray-800/60 rounded p-2 whitespace-pre-wrap break-all font-mono leading-relaxed max-h-32 overflow-y-auto">{{ (child as ToolNode).copyText }}</pre>
-                <button
-                  class="mt-1 text-xs text-gray-600 hover:text-indigo-400 transition-colors"
-                  @click.stop="copy((child as ToolNode).copyText!, child.id)"
-                >
-                  {{ copied === child.id ? '✓ Copied' : '⎘ Copy' }}
-                </button>
+                <div class="flex items-center gap-3 mt-1">
+                  <button
+                    class="text-xs text-gray-600 hover:text-indigo-400 transition-colors"
+                    @click.stop="copy((child as ToolNode).copyText!, child.id)"
+                  >{{ copied === child.id ? '✓ Copied' : '⎘ Copy' }}</button>
+                  <button
+                    v-if="(child as ToolNode).event.tool_name === 'mcp__redshift__query_redshift'"
+                    class="text-xs text-green-600 hover:text-green-400 transition-colors font-semibold"
+                    @click.stop="runQuery((child as ToolNode).copyText!)"
+                  >⚡ Run now</button>
+                </div>
               </div>
             </div>
             <span class="text-xs text-gray-700 font-mono flex-shrink-0">{{ formatRel((child as ToolNode).relTimeSec) }}</span>
@@ -128,6 +139,7 @@
 import { ref, computed, watch } from 'vue'
 import type { ObserverEvent } from '../types/events'
 import { useSessionAnalysis, type TurnNode, type ToolNode } from '../composables/useSessionAnalysis'
+import TextWithLinks from './TextWithLinks.vue'
 
 const props = defineProps<{ events: ObserverEvent[] }>()
 
@@ -143,6 +155,11 @@ const copied = ref<string | null>(null)
 function copy(text: string, id?: string) {
   navigator.clipboard.writeText(text)
   if (id) copied.value = id
+}
+
+async function runQuery(sql: string) {
+  const prompt = `run this redshift query and show me the results:\n\n${sql}`
+  await fetch(`http://localhost:4001/launch-new?cmd=${encodeURIComponent(prompt)}`)
 }
 
 watch(copied, (val) => {
