@@ -3,8 +3,15 @@
 
     <!-- Empty state -->
     <div v-if="!overview.sessions" class="flex flex-col items-center justify-center h-64 text-center">
-      <div class="text-4xl mb-3">📊</div>
-      <div class="text-gray-500 text-sm">No sessions tracked yet.<br>Start working and insights will appear here.</div>
+      <template v-if="!connected">
+        <div class="text-4xl mb-3">🔌</div>
+        <div class="text-gray-500 text-sm mb-2">Observer server is offline.</div>
+        <code class="text-xs text-indigo-400 bg-gray-800 px-3 py-1.5 rounded font-mono">claude-observer start</code>
+      </template>
+      <template v-else>
+        <div class="text-4xl mb-3">📊</div>
+        <div class="text-gray-500 text-sm">No sessions tracked yet.<br>Start working and insights will appear here.</div>
+      </template>
     </div>
 
     <template v-else>
@@ -188,6 +195,7 @@
 <script setup lang="ts">
 import { useInsights } from '../composables/useInsights'
 
+defineProps<{ connected: boolean }>()
 defineEmits<{ select: [sessionId: string] }>()
 
 const { overview, droidLeaderboard, skillFrequency, toolBreakdown, activityByDay, ticketLeaderboard, topSessionsByEvents, topSessionsByDuration, formatMs } = useInsights()

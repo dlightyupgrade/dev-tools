@@ -18,20 +18,9 @@
 
       <!-- Nav tabs (only when not in session detail) -->
       <div v-if="!selectedSessionId" class="flex items-center gap-1 py-2 flex-shrink-0">
-        <button
-          class="nav-tab"
-          :class="view === 'sessions' ? 'nav-tab-active' : ''"
-          @click="view = 'sessions'"
-        >
-          Sessions
-        </button>
-        <button
-          class="nav-tab"
-          :class="view === 'insights' ? 'nav-tab-active' : ''"
-          @click="view = 'insights'"
-        >
-          Insights
-        </button>
+        <button class="nav-tab" :class="view === 'insights' ? 'nav-tab-active' : ''" @click="view = 'insights'">Insights</button>
+        <button class="nav-tab" :class="view === 'sessions' ? 'nav-tab-active' : ''" @click="view = 'sessions'">Sessions</button>
+        <button class="nav-tab" :class="view === 'help'     ? 'nav-tab-active' : ''" @click="view = 'help'">Help</button>
       </div>
 
       <!-- MissionHeader fills remaining space -->
@@ -67,7 +56,12 @@
       <InsightsPanel
         v-else-if="!selectedSessionId && view === 'insights'"
         key="insights"
+        :connected="connected"
         @select="goToSession"
+      />
+      <HelpPanel
+        v-else-if="!selectedSessionId && view === 'help'"
+        key="help"
       />
       <SessionReplay
         v-else
@@ -86,13 +80,14 @@ import SessionReplay from './components/SessionReplay.vue'
 import InsightsPanel from './components/InsightsPanel.vue'
 import LaunchModal from './components/LaunchModal.vue'
 import ServerStatus from './components/ServerStatus.vue'
+import HelpPanel from './components/HelpPanel.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useEventsStore } from './stores/events'
 
 const { connected } = useWebSocket()
 const store = useEventsStore()
 
-const view = ref<'sessions' | 'insights'>('insights')
+const view = ref<'sessions' | 'insights' | 'help'>('insights')
 const selectedSessionId = ref<string | null>(null)
 const showLaunch = ref(false)
 
