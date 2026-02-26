@@ -13,7 +13,7 @@
         :class="summary.is_active ? 'bg-green-500 animate-pulse' : 'bg-gray-600'" />
       <span class="text-xs font-semibold flex-shrink-0"
         :class="summary.is_active ? 'text-green-500' : 'text-gray-500'">
-        {{ summary.is_active ? 'ACTIVE' : 'DONE' }}
+        {{ summary.is_active ? 'ACTIVE' : endLabel }}
       </span>
       <span class="text-xs text-gray-600 font-mono flex-shrink-0" :title="summary.session_id">{{ shortId }}</span>
       <span v-if="summary.skill_name" class="text-xs text-purple-500 font-mono truncate">⚡ /{{ summary.skill_name }}</span>
@@ -41,6 +41,12 @@
       <span class="flex-1" />
       <span class="text-xs text-gray-500">{{ summary.event_count }} events</span>
       <button
+        v-if="summary.is_active"
+        class="text-xs text-green-400 hover:text-green-300 font-mono px-1.5 py-0.5 rounded border border-green-900 hover:border-green-700 transition-colors"
+        title="Jump to iTerm2 tab"
+        @click.stop="focus"
+      >⤴ Tab</button>
+      <button
         v-if="!summary.is_active"
         class="text-xs text-indigo-400 hover:text-indigo-300 font-mono px-1.5 py-0.5 rounded border border-indigo-800 hover:border-indigo-600 transition-colors"
         @click.stop="resume"
@@ -66,6 +72,15 @@ const store = useEventsStore()
 
 const shortId = computed(() => props.summary.session_id.slice(0, 8))
 
+const END_REASON_LABELS: Record<string, string> = {
+  prompt_input_exit: 'EXITED',
+  clear: 'CLEARED',
+  logout: 'LOGOUT',
+  other: 'ENDED',
+  '': 'DONE',
+}
+const endLabel = computed(() => END_REASON_LABELS[props.summary.end_reason] ?? 'DONE')
+
 const now = ref(Date.now())
 let timer: ReturnType<typeof setInterval>
 onMounted(() => { timer = setInterval(() => { now.value = Date.now() }, 1000) })
@@ -81,6 +96,10 @@ const elapsed = computed(() => {
 })
 
 const tileStyle = computed(() => ({ '--glow-color': props.summary.dominant_color }))
+
+async function focus() {
+  await fetch(`http://localhost:4001/focus-session?session_id=${props.summary.session_id}`)
+}
 
 async function resume() {
   await fetch(`http://localhost:4001/launch?session_id=${props.summary.session_id}`)

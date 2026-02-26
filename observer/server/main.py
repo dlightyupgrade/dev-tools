@@ -200,6 +200,51 @@ end tell
     return {"ok": True, "cmd": cmd}
 
 
+CONTEXT_FILE = os.path.expanduser("~/.claude/observer-context.json")
+
+
+@app.get("/focus-session")
+async def focus_session(session_id: str = Query("")) -> dict[str, Any]:
+    if not session_id:
+        return {"ok": False, "error": "session_id is required"}
+    try:
+        with open(CONTEXT_FILE) as f:
+            ctx = json.load(f)
+        iterm_id = ctx.get(session_id, {}).get("iterm_session_id", "")
+    except Exception:
+        iterm_id = ""
+
+    if not iterm_id:
+        return {"ok": False, "error": "No iTerm2 session ID recorded for this session"}
+
+    script = f"""
+tell application "iTerm2"
+    set tabIndex to 0
+    set targetWindow to missing value
+    set targetTabIdx to 0
+    repeat with w in windows
+        set tabIndex to 0
+        repeat with t in tabs of w
+            set tabIndex to tabIndex + 1
+            repeat with s in sessions of t
+                if unique id of s is "{iterm_id}" then
+                    set targetWindow to w
+                    set targetTabIdx to tabIndex
+                end if
+            end repeat
+        end repeat
+    end repeat
+    if targetWindow is not missing value then
+        activate
+        set index of targetWindow to 1
+        tell targetWindow to select (tab targetTabIdx)
+    end if
+end tell
+"""
+    subprocess.Popen(["osascript", "-e", script])
+    return {"ok": True, "iterm_session_id": iterm_id}
+
+
 @app.get("/launch")
 async def launch_session(session_id: str = Query("")) -> dict[str, Any]:
     if not session_id:

@@ -65,6 +65,13 @@ def write_context(session_id: str, skill: str, ticket: str) -> None:
     if ticket:
         ctx[session_id]["ticket"] = ticket
 
+    # Capture the iTerm2 tab ID on first prompt so we can jump back to it later.
+    # TERM_SESSION_ID format: "w0t1p0:UUID" — AppleScript unique id is just the UUID part.
+    iterm_id = os.environ.get("TERM_SESSION_ID", "")
+    if iterm_id and "iterm_session_id" not in ctx[session_id]:
+        uuid_part = iterm_id.split(":")[-1] if ":" in iterm_id else iterm_id
+        ctx[session_id]["iterm_session_id"] = uuid_part
+
     CONTEXT_FILE.write_text(json.dumps(ctx))
 
 

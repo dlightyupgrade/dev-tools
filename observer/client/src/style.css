@@ -107,6 +107,9 @@ html.theme-light kbd.kbd {
   border-color: #cbd5e1;
 }
 
+.slide-right-enter-active, .slide-right-leave-active { transition: all 0.2s ease-out; }
+.slide-right-enter-from, .slide-right-leave-to { transform: translateX(20px); opacity: 0; }
+
 @keyframes slide-in-left {
   from { transform: translateX(-20px); opacity: 0; }
   to   { transform: translateX(0);     opacity: 1; }

@@ -90,7 +90,11 @@ export const useEventsStore = defineStore('events', () => {
       const ticketEvent = sorted.find(e => e.ticket_id)
 
       const dominant_color = droids[0]?.color ?? '#4B5563'
-      const is_active = (now - end_ts) < TEN_MINUTES
+
+      const endEvent = sorted.findLast(e => e.hook_event_type === 'SessionEnd')
+      const end_reason = (endEvent?.payload?.reason as string) ?? ''
+      // Active if: recent activity AND (no SessionEnd, OR new events arrived after the SessionEnd)
+      const is_active = (now - end_ts) < TEN_MINUTES && (!endEvent || end_ts > endEvent.timestamp)
 
       const firstPromptEvent = sorted.find(e => e.hook_event_type === 'UserPromptSubmit')
       const first_prompt = (firstPromptEvent?.payload?.prompt_preview as string) ?? ''
@@ -104,6 +108,7 @@ export const useEventsStore = defineStore('events', () => {
         start_ts,
         end_ts,
         is_active,
+        end_reason,
         dominant_color,
         first_prompt,
       }

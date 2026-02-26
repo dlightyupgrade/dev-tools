@@ -7,6 +7,7 @@ export interface SessionSummary {
   start_ts: number
   end_ts: number
   is_active: boolean
+  end_reason: string   // 'prompt_input_exit' | 'clear' | 'logout' | 'other' | '' (still running)
   dominant_color: string
   first_prompt: string
 }

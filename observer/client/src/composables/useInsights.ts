@@ -101,21 +101,26 @@ export function useInsights() {
 
   // ── Activity by day (last 14 days) ────────────────────────────────────────
 
+  // Use local date to avoid UTC roll-over (e.g. sessions after 4pm PST = next UTC day)
+  function localDateKey(ts: number): string {
+    const d = new Date(ts)
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  }
+
   const activityByDay = computed(() => {
     const days: { date: string; label: string; count: number; durationMs: number }[] = []
     const today = new Date()
-    today.setHours(0, 0, 0, 0)
 
     for (let i = 13; i >= 0; i--) {
       const d = new Date(today)
       d.setDate(d.getDate() - i)
-      const key = d.toISOString().slice(0, 10)
+      const key = localDateKey(d.getTime())
       const label = i === 0 ? 'Today' : i === 1 ? 'Yest' : d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' })
       days.push({ date: key, label, count: 0, durationMs: 0 })
     }
 
     for (const sess of sessionSummaries.value) {
-      const key = new Date(sess.start_ts).toISOString().slice(0, 10)
+      const key = localDateKey(sess.start_ts)
       const day = days.find(d => d.date === key)
       if (day) {
         day.count++

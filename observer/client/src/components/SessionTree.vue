@@ -1,5 +1,5 @@
 <template>
-  <div class="flex-1 overflow-y-auto p-4 space-y-3">
+  <div class="flex-1 overflow-y-auto p-5 space-y-4">
     <!-- Empty state -->
     <div v-if="!tree.length" class="text-center py-12 text-gray-600 text-sm">
       No events yet for this session
@@ -13,19 +13,19 @@
     >
       <!-- Prompt header -->
       <div
-        class="flex items-start gap-3 px-4 py-3 bg-gray-900 cursor-pointer hover:bg-gray-800/60 transition-colors"
+        class="flex items-start gap-4 px-5 py-4 bg-gray-900 cursor-pointer hover:bg-gray-800/60 transition-colors"
         @click="toggle(turn.id)"
       >
-        <span class="text-indigo-400 text-sm flex-shrink-0 font-mono mt-0.5">💬</span>
+        <span class="text-indigo-400 text-base flex-shrink-0 font-mono mt-0.5">💬</span>
         <div class="flex-1 min-w-0">
-          <div class="text-sm text-gray-200 font-medium leading-snug">
+          <div class="text-base text-gray-100 font-medium leading-snug">
             <TextWithLinks v-if="turn.promptPreview" :text="turn.promptPreview" />
             <span v-else class="text-gray-600">(no preview)</span>
           </div>
         </div>
         <div class="flex items-center gap-3 flex-shrink-0">
-          <span class="text-xs text-gray-600 font-mono">{{ formatRel(turn.relTimeSec) }}</span>
-          <span class="text-xs text-gray-600">{{ turn.children.length > 0 ? (collapsed.has(turn.id) ? '▶' : '▼') : '' }}</span>
+          <span class="text-sm text-gray-500 font-mono">{{ formatRel(turn.relTimeSec) }}</span>
+          <span class="text-sm text-gray-600">{{ turn.children.length > 0 ? (collapsed.has(turn.id) ? '▶' : '▼') : '' }}</span>
         </div>
       </div>
 
@@ -36,25 +36,26 @@
           <div v-if="child.type === 'droid'" class="border-t border-gray-800/60">
             <!-- Droid header -->
             <div
-              class="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-gray-800/30 transition-colors"
-              :style="{ borderLeft: `3px solid ${child.droid_color}` }"
+              class="flex items-center gap-3 px-5 py-3.5 cursor-pointer hover:bg-gray-800/30 transition-colors"
+              :style="{ borderLeft: `4px solid ${child.droid_color}` }"
               @click="toggle(child.id)"
             >
-              <span class="text-sm flex-shrink-0">{{ child.droid_emoji }}</span>
-              <span class="text-sm font-semibold font-mono flex-shrink-0" :style="{ color: child.droid_color }">
+              <span class="text-lg flex-shrink-0">{{ child.droid_emoji }}</span>
+              <span class="text-base font-bold font-mono flex-shrink-0" :style="{ color: child.droid_color }">
                 {{ child.droid_name }}
               </span>
               <span
-                class="text-xs px-1.5 py-0.5 rounded font-mono flex-shrink-0"
+                class="text-sm px-2 py-0.5 rounded font-mono flex-shrink-0"
                 :style="{ backgroundColor: child.droid_color + '22', color: child.droid_color }"
               >
                 {{ child.duration_ms > 0 ? formatMs(child.duration_ms) : 'running…' }}
               </span>
-              <span class="flex-1" />
-              <span class="text-xs text-gray-600 font-mono">{{ formatRel(child.relTimeSec) }}</span>
-              <span v-if="child.tools.length" class="text-xs text-gray-700">
-                {{ collapsed.has(child.id) ? '▶' : '▼' }}
+              <span v-if="child.tools.length" class="text-xs text-gray-600 font-mono">
+                {{ child.tools.length }} calls
               </span>
+              <span class="flex-1" />
+              <span class="text-sm text-gray-500 font-mono">{{ formatRel(child.relTimeSec) }}</span>
+              <span class="text-sm text-gray-600 ml-1">{{ collapsed.has(child.id) ? '▶' : '▼' }}</span>
             </div>
 
             <!-- Droid tool calls -->
@@ -62,17 +63,17 @@
               <div
                 v-for="tool in child.tools"
                 :key="tool.id"
-                class="flex items-start gap-3 px-4 py-1.5 hover:bg-gray-800/20 transition-colors"
-                :style="{ borderLeft: `3px solid ${child.droid_color}44`, paddingLeft: '2.5rem' }"
+                class="flex items-start gap-3 hover:bg-gray-800/20 transition-colors py-2.5"
+                :style="{ borderLeft: `4px solid ${child.droid_color}33`, paddingLeft: '3rem' }"
               >
                 <!-- Tool icon -->
-                <span class="flex-shrink-0 mt-0.5 text-xs" :style="{ color: tool.color }">
+                <span class="flex-shrink-0 mt-0.5 text-sm" :style="{ color: tool.color }">
                   {{ toolIcon(tool.event.tool_name) }}
                 </span>
                 <!-- Tool label -->
                 <div class="flex-1 min-w-0">
-                  <span class="text-xs font-mono" :style="{ color: tool.color }">{{ tool.label }}</span>
-                  <span v-if="tool.sublabel" class="text-xs text-gray-600 ml-2">
+                  <span class="text-sm font-mono font-medium" :style="{ color: tool.color }">{{ tool.label }}</span>
+                  <span v-if="tool.sublabel" class="text-sm text-gray-500 ml-2">
                     <TextWithLinks :text="tool.sublabel" />
                   </span>
                   <!-- Expandable copy/run block for SQL/Bash -->
@@ -91,7 +92,7 @@
                     </div>
                   </div>
                 </div>
-                <span class="text-xs text-gray-700 font-mono flex-shrink-0">{{ formatRel(tool.relTimeSec) }}</span>
+                <span class="text-sm text-gray-600 font-mono flex-shrink-0">{{ formatRel(tool.relTimeSec) }}</span>
               </div>
             </div>
           </div>

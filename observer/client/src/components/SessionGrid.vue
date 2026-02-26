@@ -26,19 +26,36 @@
         </div>
       </div>
 
-      <TransitionGroup
-        tag="div"
-        name="tile-fade"
-        class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
-      >
-        <SessionTile
-          v-for="(summary, index) in sorted"
-          :key="summary.session_id"
-          :summary="summary"
-          :style="{ animationDelay: `${index * 40}ms` }"
-          @select="$emit('select', $event)"
-        />
-      </TransitionGroup>
+      <!-- Active sessions -->
+      <div v-if="activeSessions.length" class="mb-6">
+        <div class="text-xs font-semibold text-green-500 uppercase tracking-wider mb-3 flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block" />
+          Active
+        </div>
+        <TransitionGroup tag="div" name="tile-fade" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <SessionTile
+            v-for="(summary, index) in activeSessions"
+            :key="summary.session_id"
+            :summary="summary"
+            :style="{ animationDelay: `${index * 40}ms` }"
+            @select="$emit('select', $event)"
+          />
+        </TransitionGroup>
+      </div>
+
+      <!-- Ended sessions -->
+      <div v-if="endedSessions.length">
+        <div class="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-3">Ended</div>
+        <TransitionGroup tag="div" name="tile-fade" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <SessionTile
+            v-for="(summary, index) in endedSessions"
+            :key="summary.session_id"
+            :summary="summary"
+            :style="{ animationDelay: `${index * 40}ms` }"
+            @select="$emit('select', $event)"
+          />
+        </TransitionGroup>
+      </div>
     </template>
   </div>
 </template>
@@ -61,4 +78,7 @@ const activeCount = computed(() => sessionSummaries.value.filter(s => s.is_activ
 const sorted = computed(() =>
   sortAsc.value ? [...sessionSummaries.value].reverse() : sessionSummaries.value
 )
+
+const activeSessions = computed(() => sorted.value.filter(s => s.is_active))
+const endedSessions  = computed(() => sorted.value.filter(s => !s.is_active))
 </script>
