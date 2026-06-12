@@ -20,6 +20,7 @@
       <div v-if="!selectedSessionId" class="flex items-center gap-1 py-2 flex-shrink-0">
         <button class="nav-tab" :class="view === 'insights' ? 'nav-tab-active' : ''" @click="view = 'insights'">Insights</button>
         <button class="nav-tab" :class="view === 'sessions' ? 'nav-tab-active' : ''" @click="view = 'sessions'">Sessions</button>
+        <button class="nav-tab" :class="view === 'memory'   ? 'nav-tab-active' : ''" @click="view = 'memory'">Memory</button>
         <button class="nav-tab" :class="view === 'help'     ? 'nav-tab-active' : ''" @click="view = 'help'">Help</button>
       </div>
 
@@ -59,6 +60,10 @@
         :connected="connected"
         @select="goToSession"
       />
+      <MemoryPanel
+        v-else-if="!selectedSessionId && view === 'memory'"
+        key="memory"
+      />
       <HelpPanel
         v-else-if="!selectedSessionId && view === 'help'"
         key="help"
@@ -81,13 +86,14 @@ import InsightsPanel from './components/InsightsPanel.vue'
 import LaunchModal from './components/LaunchModal.vue'
 import ServerStatus from './components/ServerStatus.vue'
 import HelpPanel from './components/HelpPanel.vue'
+import MemoryPanel from './components/MemoryPanel.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useEventsStore } from './stores/events'
 
 const { connected } = useWebSocket()
 const store = useEventsStore()
 
-const view = ref<'sessions' | 'insights' | 'help'>('insights')
+const view = ref<'sessions' | 'insights' | 'memory' | 'help'>('insights')
 const selectedSessionId = ref<string | null>(null)
 const showLaunch = ref(false)
 
