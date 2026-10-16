@@ -57,6 +57,14 @@ class Store:
         self._write("latest.json", envelope)
         return envelope
 
+    def latest_stats(self) -> dict | None:
+        return self._read("stats.json", None)
+
+    def save_stats(self, stats: dict, source: str) -> dict:
+        envelope = {"fetched_at": now(), "source": source, **stats}
+        self._write("stats.json", envelope)
+        return envelope
+
     def known(self) -> dict:
         return self._read("known.json", {})
 
@@ -82,6 +90,24 @@ class Store:
         investigations = self.investigations()
         investigations[finding_id] = record
         self._write("investigations.json", investigations)
+
+    def pins(self) -> list:
+        return self._read("pins.json", [])
+
+    def set_pin(self, finding_id: str, pinned: bool) -> list:
+        pins = [pin for pin in self.pins() if pin != finding_id]
+        if pinned:
+            pins.append(finding_id)
+        self._write("pins.json", pins)
+        return pins
+
+    def seen(self) -> dict:
+        return self._read("seen.json", {})
+
+    def mark_seen(self, finding_id: str, token: str) -> None:
+        seen = self.seen()
+        seen[finding_id] = token
+        self._write("seen.json", seen)
 
     def audit(self, action: str, **fields) -> None:
         line = json.dumps({"at": now(), "user": getpass.getuser(), "action": action, **fields})

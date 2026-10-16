@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 
 from servicing_triage_ui.app import App, import_report, serve
-from servicing_triage_ui.headless import TRIAGE_TOOL
+from servicing_triage_ui.headless import STATS_TOOL, TRIAGE_TOOL
 from servicing_triage_ui.security import Guard
 from servicing_triage_ui.store import Store
 from servicing_triage_ui.sumo_index import SumoIndex
 
 FIXTURE = Path(__file__).parent / "fixtures" / "triage_sample.json"
 TEXT = json.loads(FIXTURE.read_text())["text"]
+STATS_TEXT = (Path(__file__).parent / "fixtures" / "stats_sample.txt").read_text()
 SESSION = "0f8fad5b-d9cb-469f-a165-70867728950e"
 TOKEN = "test-token"
 
@@ -37,8 +38,15 @@ def running(tmp_path, monkeypatch):
     final = tmp_path / "final.json"
     final.write_text(json.dumps({"type": "result", "is_error": False, "result": "Looks like ops.", "session_id": SESSION, "total_cost_usd": 0.2, "duration_ms": 5000}))
     claude = tmp_path / "claude"
+    stats_stream = tmp_path / "stats.jsonl"
+    stats_stream.write_text("\n".join(json.dumps(e) for e in [
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "s", "name": STATS_TOOL, "input": {}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "s", "content": [{"type": "text", "text": json.dumps({"text": STATS_TEXT})}]}]}},
+        {"type": "result", "total_cost_usd": 0.03, "duration_ms": 10, "is_error": False, "result": "done"},
+    ]))
     claude.write_text(
-        '#!/bin/bash\nfor a in "$@"; do\n [ "$a" = "stream-json" ] && cat ' + str(stream) + ' && exit 0\n [ "$a" = "json" ] && cat ' + str(final) + ' && exit 0\ndone\n'
+        '#!/bin/bash\ncase "$*" in *"Call the daily_stats tool"*) cat ' + str(stats_stream) + '; exit 0;; esac\n'
+        'for a in "$@"; do\n [ "$a" = "stream-json" ] && cat ' + str(stream) + ' && exit 0\n [ "$a" = "json" ] && cat ' + str(final) + ' && exit 0\ndone\n'
     )
     claude.chmod(0o755)
     port = free_port()
@@ -212,3 +220,41 @@ def test_oversized_and_malformed_bodies_are_rejected(running):
     connection = http.client.HTTPConnection("127.0.0.1", port)
     connection.request("POST", "/api/known", "[1,2]", {"Content-Type": "application/json", "X-Triage-Token": TOKEN})
     assert connection.getresponse().status == 400
+
+
+def test_stats_refresh_saves_parsed_stats(running):
+    app, port = running
+    assert call(port, "GET", "/api/state")[1]["stats"] is None
+    assert call(port, "POST", "/api/stats", {"day": "yesterday"})[0] == 200
+    state = wait_for_jobs(port)
+    assert state["jobs"][0]["status"] == "done"
+    assert state["stats"]["day"] == "Thu 2026-10-15" and len(state["stats"]["sections"]) == 3
+    assert call(port, "POST", "/api/stats", {"day": "last week"})[0] == 400
+
+
+def test_pin_roundtrip_and_unknown_finding(running):
+    app, port = running
+    finding_id = first_finding_id(app)
+    assert call(port, "POST", "/api/pin", {"finding_id": finding_id, "pinned": True})[1] == [finding_id]
+    assert call(port, "GET", "/api/state")[1]["pins"] == [finding_id]
+    assert call(port, "POST", "/api/pin", {"finding_id": finding_id, "pinned": False})[1] == []
+    assert call(port, "POST", "/api/pin", {"finding_id": "nope", "pinned": True})[0] == 404
+
+
+def test_finished_investigation_needs_attention_until_seen(running):
+    app, port = running
+    finding_id = first_finding_id(app)
+    call(port, "POST", "/api/investigate", {"finding_id": finding_id})
+    state = wait_for_jobs(port)
+    assert state["attention"][finding_id]["kind"] == "result"
+    assert call(port, "POST", "/api/seen", {"finding_id": finding_id})[0] == 200
+    assert finding_id not in call(port, "GET", "/api/state")[1]["attention"]
+
+
+def test_failed_investigation_is_flagged(running):
+    app, port = running
+    finding_id = first_finding_id(app)
+    app.claude = "/bin/false"
+    call(port, "POST", "/api/investigate", {"finding_id": finding_id})
+    state = wait_for_jobs(port)
+    assert state["attention"][finding_id]["kind"] == "failed"

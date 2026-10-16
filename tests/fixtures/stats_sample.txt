@@ -1,0 +1,22 @@
+Servicing stats for Thu 2026-10-15 (UTC), change against the day before
+
+Payments
+  Payments processed: 67,175, $20,064,045.92 (+6% vs the day before)
+  Refunds processed: 1,132, $640,066.45 (+31% vs the day before)
+  Reversals processed: 4,372, $950,245.06 (-20% vs the day before)
+  Failed requests: 11, $2,917.30 (+38% vs the day before) [TRANSACTION 6, REVERSAL 4, REFUND 1] -> follow up with failure triage
+
+Due dates
+  Due date changes, all payments: 641 (+8% vs the day before)
+  Delay a payment requests: 10 (+150% vs the day before) [PENDING_SATISFY 10]
+
+Charge-offs
+  Loan charge-offs completed: 692 (-6% vs the day before)
+  Loan charge-offs failed: 1 (same as the day before) -> follow up with failure triage
+  Credit line charge-offs completed: 124 (-3% vs the day before)
+  Credit line charge-offs failed: 13 (+18% vs the day before) -> follow up with failure triage
+  Home improvement charge-offs completed: 6 (-33% vs the day before)
+  Home improvement charge-offs failed: 1 (same as the day before) -> follow up with failure triage
+
+Counted by when each request was created, with its status now. Not covered yet: settlements, NSF by return code.
+Could not check: loan hardship: query failed — network: Database query failed: (redshift_connector.error.ProgrammingError) {'S': 'ERROR', 'C': 'XX000', 'M': 'permission denied for schema loanhardship', 'F': 'x'; loan restructures: query failed — network: Database query failed: (redshift_connector.error.ProgrammingError) {'S': 'ERROR', 'C': 'XX000', 'M': 'permission denied for schema loanhardship', 'F': 'x'

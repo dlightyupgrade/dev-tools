@@ -16,6 +16,7 @@ from pathlib import Path
 from . import headless, launcher
 from .parser import parse_report
 from .security import Guard
+from .stats import parse_stats
 from .store import Store
 from .sumo_index import SumoIndex, needles_for
 
@@ -42,6 +43,35 @@ class App:
         report = self.store.latest_report()
         return next((f for f in (report or {}).get("findings", []) if f["id"] == finding_id), None)
 
+    def attention(self) -> dict:
+        """Findings whose headless result has not been looked at yet, keyed by finding id."""
+        seen = self.store.seen()
+        found: dict[str, dict] = {}
+        for finding_id, record in self.store.investigations().items():
+            found[finding_id] = {"kind": "result", "token": record.get("at", "")}
+        with self.lock:
+            jobs = sorted((j for j in self.jobs.values() if j["kind"] == "investigate" and j["status"] != "running"), key=lambda j: j["started"])
+        for job in jobs:
+            if job["status"] == "error":
+                found[job["finding_id"]] = {"kind": "failed", "token": "job:" + job["id"], "message": job["message"]}
+            else:
+                found.pop(job["finding_id"], None)
+                if job["finding_id"] in self.store.investigations():
+                    found[job["finding_id"]] = {"kind": "result", "token": self.store.investigations()[job["finding_id"]].get("at", "")}
+        return {finding_id: info for finding_id, info in found.items() if seen.get(finding_id) != info["token"]}
+
+    def mark_seen(self, finding_id: str) -> dict:
+        info = self.attention().get(finding_id)
+        if info:
+            self.store.mark_seen(finding_id, info["token"])
+        return {"ok": True}
+
+    def pin(self, finding_id: str, pinned: bool) -> list:
+        if self.finding(finding_id) is None:
+            raise LookupError("unknown finding")
+        self.store.audit("pin", finding=finding_id, pinned=pinned)
+        return self.store.set_pin(finding_id, pinned)
+
     def state(self) -> dict:
         report = self.store.latest_report()
         if report:
@@ -53,6 +83,9 @@ class App:
             "report": report,
             "known": self.store.known(),
             "investigations": self.store.investigations(),
+            "stats": self.store.latest_stats(),
+            "pins": self.store.pins(),
+            "attention": self.attention(),
             "jobs": jobs,
             "sumo": {"available": self.sumo.available, "count": len(self.sumo.monitors), **self.sumo.info},
             "capabilities": {
@@ -99,6 +132,22 @@ class App:
             self.store.audit("refresh_finished", job=job["id"], cost_usd=report["run"]["cost_usd"], signatures=report["signatures"])
 
         return self._start("refresh", f"Refresh, last {window_days} {'day' if window_days == 1 else 'days'}", "", work)
+
+    def refresh_stats(self, day: str) -> dict:
+        if not self.claude:
+            raise ValueError("claude CLI not found")
+        if day not in ("yesterday", "today"):
+            raise ValueError("day must be yesterday or today")
+
+        def work(job: dict) -> None:
+            self.store.audit("stats_started", job=job["id"], day=day)
+            outcome = headless.run_stats(self.claude, day, self.timeout, self.budget)
+            parsed = parse_stats(outcome["text"])
+            self.store.save_stats({**parsed, "requested_day": day, "run": outcome["run"]}, "headless")
+            job["message"] = parsed["day"]
+            self.store.audit("stats_finished", job=job["id"], cost_usd=outcome["run"]["cost_usd"])
+
+        return self._start("stats", f"Daily stats, {day}", "", work)
 
     def investigate(self, finding_id: str) -> dict:
         finding = self.finding(finding_id)
@@ -206,10 +255,16 @@ def make_handler(app: App):
                 if not isinstance(window, int):
                     raise ValueError("window_days must be an integer")
                 return app.refresh(window)
+            if path == "/api/stats":
+                return app.refresh_stats(str(body.get("day", "yesterday")))
             if path == "/api/investigate":
                 return app.investigate(finding_id)
             if path == "/api/launch":
                 return app.launch(finding_id, bool(body.get("resume")))
+            if path == "/api/pin":
+                return app.pin(finding_id, bool(body.get("pinned")))
+            if path == "/api/seen":
+                return app.mark_seen(finding_id)
             if path == "/api/known":
                 if app.finding(finding_id) is None:
                     raise LookupError("unknown finding")

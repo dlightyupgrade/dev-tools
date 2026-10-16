@@ -2,13 +2,19 @@
   const TOKEN = document.querySelector('meta[name="triage-token"]').content;
   const $ = (id) => document.getElementById(id);
   const DISPOSITIONS = { bug: "Bug", ops: "Needs a person", review: "No playbook" };
+  const SECTION_TITLES = { bug: "Bugs", ops: "Needs a person", review: "No playbook yet" };
+  const SECTION_HINT = {
+    bug: "A code or data defect. A ticket draft is attached.",
+    ops: "Not a defect. Someone has to act on the loan or payment.",
+    review: "Failures with no playbook. Decide whether one is needed."
+  };
   const KNOWN_LABEL = { known: "Known", ticketed: "Ticketed", ignore: "Ignored" };
   const GROUPS = ["Payments", "Task queues", "Billing"];
 
   let state = null;
   let lastSignature = "";
   let pollTimer = null;
-  const openRows = new Set();
+  let openedSeen = "";
   const view = { disposition: "all", group: "all", query: "", hideKnown: true };
 
   const el = (tag, className, text) => {
@@ -18,6 +24,7 @@
     return node;
   };
   const money = (value) => value.toLocaleString("en-US", { style: "currency", currency: "USD" });
+  const wholeMoney = (value) => value.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
   const groupOf = (finding) => (finding.area.endsWith("-tqf") ? "Task queues" : finding.area === "billing" ? "Billing" : "Payments");
   const ago = (iso) => {
     const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
@@ -64,9 +71,41 @@
   }
 
   const runningJobs = () => (state ? state.jobs.filter((job) => job.status === "running") : []);
+  const knownFor = (finding) => state.known[finding.id] || null;
+  const isPinned = (finding) => state.pins.includes(finding.id);
+  const attentionFor = (finding) => state.attention[finding.id] || null;
+  const investigating = (finding) => runningJobs().some((job) => job.kind === "investigate" && job.finding_id === finding.id);
 
-  function knownFor(finding) {
-    return state.known[finding.id] || null;
+  function currentRoute() {
+    const hash = location.hash.replace(/^#/, "");
+    const found = /^\/f\/([0-9a-f]{12})$/.exec(hash);
+    if (found) return { name: "finding", id: found[1] };
+    if (hash === "/stats") return { name: "stats" };
+    return { name: "list" };
+  }
+
+  async function act(label, work) {
+    try {
+      await work();
+      if (label) toast(label);
+      await load();
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+
+  function pinButton(finding) {
+    const pinned = isPinned(finding);
+    const button = el("button", "pin" + (pinned ? " on" : ""), pinned ? "★" : "☆");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(pinned));
+    button.setAttribute("aria-label", pinned ? "Unpin this issue" : "Pin this issue");
+    button.title = pinned ? "Unpin" : "Pin to the top of the list";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      act(pinned ? "Unpinned" : "Pinned", () => api("/api/pin", { finding_id: finding.id, pinned: !pinned }));
+    });
+    return button;
   }
 
   function visibleFindings() {
@@ -74,77 +113,128 @@
     return state.report.findings.filter((finding) => {
       if (view.disposition !== "all" && finding.disposition !== view.disposition) return false;
       if (view.group !== "all" && groupOf(finding) !== view.group) return false;
-      if (view.hideKnown && knownFor(finding)) return false;
+      if (!isPinned(finding) && view.hideKnown && knownFor(finding)) return false;
       if (!query) return true;
       return [finding.title, finding.key, finding.code, finding.summary, finding.error_text].join(" ").toLowerCase().includes(query);
     });
   }
 
-  function renderMeta() {
-    const report = state.report;
-    $("meta").textContent = report
-      ? "Last " + report.window_days + (report.window_days === 1 ? " day" : " days") + ", fetched " + ago(report.fetched_at) + " (" + report.source + ")"
-      : "No report yet";
-    const refresh = $("refresh");
-    const refreshing = runningJobs().some((job) => job.kind === "refresh");
-    refresh.disabled = refreshing || !state.capabilities.headless;
-    refresh.textContent = refreshing ? "Refreshing..." : "Refresh";
-    refresh.title = state.capabilities.headless ? "Runs failure_triage headless. About 4 minutes and about $0.35." : "claude CLI not found";
+  function figuresOf(finding) {
+    const unit = finding.unit.replace(/^failed /, "");
+    return finding.dollars != null
+      ? [money(finding.dollars), finding.count + " " + unit]
+      : [finding.count + " " + unit, finding.window_days + " d window"];
   }
 
-  function renderBanner() {
-    const banner = $("banner");
-    const running = runningJobs();
-    const failed = state.jobs.find((job) => job.status === "error" && Date.now() / 1000 - (job.finished || 0) < 600);
-    banner.replaceChildren();
-    banner.className = "banner";
-    if (running.length) {
-      running.forEach((job) => {
-        const seconds = Math.round(Date.now() / 1000 - job.started);
-        banner.appendChild(el("span", "", job.label + " running, " + seconds + " s. Headless runs take a few minutes."));
-      });
-      banner.hidden = false;
-    } else if (failed) {
-      banner.classList.add("error");
-      banner.appendChild(el("span", "", failed.label + " failed: " + failed.message));
-      banner.hidden = false;
-    } else {
-      banner.hidden = true;
+  function monitorPill(finding) {
+    if (!state.sumo.available || !finding.sumo) return null;
+    const total = finding.sumo.total;
+    return el("span", "pill " + (total ? "monitor" : "gap"), total ? total + " monitor" + (total === 1 ? "" : "s") : "No monitor");
+  }
+
+  function badgesFor(finding) {
+    const badges = el("div", "badges");
+    badges.appendChild(el("span", "mono", [finding.code, groupOf(finding)].filter(Boolean).join(" · ")));
+    if (finding.route) badges.appendChild(el("span", "", "route: " + finding.route));
+    const attention = attentionFor(finding);
+    if (investigating(finding)) badges.appendChild(el("span", "pill running", "Investigating"));
+    else if (attention) badges.appendChild(el("span", "pill attn", attention.kind === "failed" ? "Investigation failed" : "Result ready"));
+    else if (state.investigations[finding.id]) badges.appendChild(el("span", "pill muted", "Investigated"));
+    const known = knownFor(finding);
+    if (known) badges.appendChild(el("span", "pill good", KNOWN_LABEL[known.state] + (known.ticket ? " " + known.ticket : "")));
+    const monitors = monitorPill(finding);
+    if (monitors) badges.appendChild(monitors);
+    return badges;
+  }
+
+  function buildRow(finding) {
+    const row = el("div", "row " + finding.disposition + (attentionFor(finding) ? " attn" : ""));
+    const body = el("div", "row-body");
+    const link = el("a", "row-link", finding.title);
+    link.href = "#/f/" + finding.id;
+    body.append(link, badgesFor(finding));
+    const [main, sub] = figuresOf(finding);
+    const figures = el("div", "figures");
+    figures.append(el("span", "mono", main), el("span", "mono", sub));
+    row.append(pinButton(finding), body, figures);
+    return row;
+  }
+
+  function sectionOf(name, title, hint, findings) {
+    const section = el("section", "band " + name);
+    const head = el("header", "band-head");
+    const heading = el("div", "band-title");
+    heading.append(el("h2", "", title), el("span", "count", String(findings.length)));
+    head.appendChild(heading);
+    const dollars = findings.reduce((sum, finding) => sum + (finding.dollars || 0), 0);
+    head.appendChild(el("span", "soft band-hint", hint + (dollars ? " · " + wholeMoney(dollars) : "")));
+    section.appendChild(head);
+    const rows = el("div", "rows");
+    findings.forEach((finding) => rows.appendChild(buildRow(finding)));
+    section.appendChild(rows);
+    return section;
+  }
+
+  function renderSections(container) {
+    container.replaceChildren();
+    const findings = visibleFindings();
+    if (!findings.length) {
+      const empty = el("div", "empty");
+      empty.appendChild(el("b", "", "Nothing matches these filters"));
+      empty.appendChild(el("span", "", state.report.findings.length + " findings in this report. Some are hidden by the filters or by Hide known."));
+      container.appendChild(empty);
+      return;
     }
+    const pinned = findings.filter(isPinned);
+    if (pinned.length) container.appendChild(sectionOf("pinned", "Pinned", "Kept at the top until you unpin them", pinned));
+    Object.keys(SECTION_TITLES).forEach((name) => {
+      const members = findings.filter((finding) => finding.disposition === name && !isPinned(finding));
+      if (members.length) container.appendChild(sectionOf(name, SECTION_TITLES[name], SECTION_HINT[name], members));
+    });
   }
 
-  function renderSummary() {
-    const node = $("summary");
-    node.replaceChildren();
-    if (!state.report) return;
-    const findings = state.report.findings;
+  function summaryCards(report) {
+    const node = el("section", "summary");
+    node.setAttribute("aria-label", "Summary");
+    const findings = report.findings;
     const count = (name) => findings.filter((finding) => finding.disposition === name).length;
     const open = findings.filter((finding) => !knownFor(finding)).length;
     const dollars = findings.reduce((sum, finding) => sum + (finding.dollars || 0), 0);
     const noMonitor = state.sumo.available ? findings.filter((finding) => finding.sumo && finding.sumo.total === 0).length : null;
     const cells = [
-      [String(state.report.signatures), "signatures"],
-      [String(state.report.failures), "failures"],
-      [money(dollars), "payment dollars"],
-      [String(count("bug")), count("bug") === 1 ? "bug" : "bugs"],
-      [String(count("ops")), count("ops") === 1 ? "needs a person" : "need a person"],
-      [String(open), "not marked known"]
+      [String(report.failures), "failures", ""],
+      [wholeMoney(dollars), "payment dollars", ""],
+      [String(count("bug")), count("bug") === 1 ? "bug" : "bugs", "bug"],
+      [String(count("ops")), count("ops") === 1 ? "needs a person" : "need a person", "ops"],
+      [String(count("review")), "no playbook", "review"],
+      [String(open), "not marked known", ""]
     ];
-    if (noMonitor !== null) cells.push([String(noMonitor), noMonitor === 1 ? "has no monitor mention" : "have no monitor mention"]);
-    cells.forEach(([value, label]) => {
-      const cell = el("div");
+    if (noMonitor !== null) cells.push([String(noMonitor), noMonitor === 1 ? "has no monitor" : "have no monitor", "gap"]);
+    cells.forEach(([value, label, tone]) => {
+      const cell = el("div", "stat " + tone);
       cell.append(el("span", "num", value), el("span", "lbl", label));
       node.appendChild(cell);
     });
+    return node;
   }
 
-  function renderUnchecked() {
-    const panel = $("unchecked");
-    const list = $("unchecked-list");
-    list.replaceChildren();
-    const items = state.report ? state.report.unchecked : [];
-    panel.hidden = items.length === 0;
-    items.forEach((item) => list.appendChild(el("li", "", item.name + ": " + item.reason)));
+  function attentionPanel(findings) {
+    const items = findings.filter((finding) => attentionFor(finding));
+    if (!items.length) return null;
+    const panel = el("section", "attention");
+    panel.setAttribute("aria-label", "Needs your attention");
+    const head = el("div", "attention-head");
+    head.append(el("h2", "", "Needs your attention"), el("span", "count", String(items.length)));
+    panel.appendChild(head);
+    items.forEach((finding) => {
+      const attention = attentionFor(finding);
+      const line = el("div", "attention-row");
+      const link = el("a", "", finding.title);
+      link.href = "#/f/" + finding.id;
+      line.append(link, el("span", "soft", attention.kind === "failed" ? "Investigation failed: " + (attention.message || "") : "Investigation result is ready"));
+      panel.appendChild(line);
+    });
+    return panel;
   }
 
   function chip(label, pressed, onClick) {
@@ -155,19 +245,67 @@
     return button;
   }
 
-  function renderFilters() {
-    const dispositionNode = $("disposition-chips");
-    const areaNode = $("area-chips");
-    dispositionNode.replaceChildren();
-    areaNode.replaceChildren();
-    if (!state.report) return;
-    const findings = state.report.findings;
-    const entries = [["all", "All (" + findings.length + ")"]].concat(
-      Object.keys(DISPOSITIONS).map((key) => [key, DISPOSITIONS[key] + " (" + findings.filter((f) => f.disposition === key).length + ")"]));
-    entries.forEach(([key, label]) => dispositionNode.appendChild(chip(label, view.disposition === key, () => { view.disposition = key; renderView(); })));
-    const groups = [["all", "All areas"]].concat(GROUPS.map((name) => [name, name + " (" + findings.filter((f) => groupOf(f) === name).length + ")"]));
-    groups.forEach(([key, label]) => areaNode.appendChild(chip(label, view.group === key, () => { view.group = key; renderView(); })));
+  function toolbar(findings, onChange) {
+    const bar = el("section", "toolbar");
+    bar.setAttribute("aria-label", "Filters");
+    const dispositions = el("div", "chips");
+    [["all", "All (" + findings.length + ")"]].concat(
+      Object.keys(DISPOSITIONS).map((key) => [key, DISPOSITIONS[key] + " (" + findings.filter((f) => f.disposition === key).length + ")"]))
+      .forEach(([key, label]) => dispositions.appendChild(chip(label, view.disposition === key, () => { view.disposition = key; renderPage(); })));
+    const areas = el("div", "chips");
+    [["all", "All areas"]].concat(GROUPS.map((name) => [name, name + " (" + findings.filter((f) => groupOf(f) === name).length + ")"]))
+      .forEach(([key, label]) => areas.appendChild(chip(label, view.group === key, () => { view.group = key; renderPage(); })));
+    const tools = el("div", "tools");
+    const search = el("input");
+    search.type = "search";
+    search.id = "search";
+    search.placeholder = "Search code, task or text";
+    search.setAttribute("aria-label", "Search findings");
+    search.value = view.query;
+    search.addEventListener("input", (event) => { view.query = event.target.value; onChange(); });
+    const label = el("label", "check");
+    const box = el("input");
+    box.type = "checkbox";
+    box.id = "hide-known";
+    box.checked = view.hideKnown;
+    box.addEventListener("change", (event) => { view.hideKnown = event.target.checked; onChange(); });
+    label.append(box, document.createTextNode(" Hide known"));
+    tools.append(search, label);
+    bar.append(dispositions, areas, tools);
+    return bar;
   }
+
+  function uncheckedPanel(items) {
+    if (!items.length) return null;
+    const panel = el("section", "panel warn");
+    panel.appendChild(el("h2", "", "Sensors that did not run"));
+    const list = el("ul");
+    items.forEach((item) => list.appendChild(el("li", "", item.name + ": " + item.reason)));
+    panel.appendChild(list);
+    return panel;
+  }
+
+  function emptyReport() {
+    const empty = el("div", "empty");
+    empty.appendChild(el("b", "", "No report yet"));
+    empty.appendChild(el("span", "", "Refresh runs failure_triage headless (about 4 minutes, about $0.35). To load a saved run instead:"));
+    empty.appendChild(el("code", "mono", "python3 -m servicing_triage_ui import <file>"));
+    return empty;
+  }
+
+  function renderList(page) {
+    if (!state.report) {
+      page.appendChild(emptyReport());
+      return;
+    }
+    const findings = state.report.findings;
+    [attentionPanel(findings), summaryCards(state.report), uncheckedPanel(state.report.unchecked)].forEach((node) => node && page.appendChild(node));
+    const sections = el("div", "sections");
+    page.append(toolbar(findings, () => renderSections(sections)), sections);
+    renderSections(sections);
+  }
+
+  /* ---------- finding view ---------- */
 
   function table(columns, rows) {
     const wrap = el("div", "scroll");
@@ -187,8 +325,8 @@
     return wrap;
   }
 
-  function block(title) {
-    const node = el("div", "block");
+  function panel(title, tone) {
+    const node = el("section", "card" + (tone ? " " + tone : ""));
     node.appendChild(el("h2", "", title));
     return node;
   }
@@ -200,25 +338,25 @@
     list.appendChild(group);
   }
 
-  function monitorsBlock(finding) {
-    const node = block("Sumo monitors that mention this");
+  function monitorsCard(finding) {
+    const node = panel("Sumo monitors that mention this", "monitors");
     if (!state.sumo.available) {
       node.appendChild(el("p", "note", "No monitor index. Run: python3 -m servicing_triage_ui sync-monitors"));
       return node;
     }
     const sumo = finding.sumo;
     if (!sumo || sumo.total === 0) {
-      node.appendChild(el("p", "", "No monitor definition mentions this code, text or task."));
+      node.appendChild(el("p", "gap-note", "No monitor definition mentions this code, text or task."));
     } else {
       sumo.monitors.forEach((monitor) => {
         const card = el("div", "monitor");
         card.appendChild(el("b", "", monitor.name));
         const meta = el("div", "meta");
-        meta.appendChild(el("span", "", "matched on " + monitor.matched_on.join(", ")));
-        if (monitor.priority) meta.appendChild(el("span", "", monitor.priority));
-        if (monitor.window) meta.appendChild(el("span", "", monitor.window + " window"));
-        monitor.channels.forEach((channel) => meta.appendChild(el("span", "mono", "#" + channel)));
-        if (monitor.incidentio) meta.appendChild(el("span", "", "incident.io"));
+        meta.appendChild(el("span", "tag", "matched on " + monitor.matched_on.join(", ")));
+        if (monitor.priority) meta.appendChild(el("span", "tag", monitor.priority));
+        if (monitor.window) meta.appendChild(el("span", "tag", monitor.window + " window"));
+        monitor.channels.forEach((channel) => meta.appendChild(el("span", "tag mono", "#" + channel)));
+        if (monitor.incidentio) meta.appendChild(el("span", "tag", "incident.io"));
         card.appendChild(meta);
         node.appendChild(card);
       });
@@ -228,11 +366,13 @@
     return node;
   }
 
-  function investigationBlock(finding) {
-    const node = block("Investigation");
-    const running = runningJobs().find((job) => job.kind === "investigate" && job.finding_id === finding.id);
+  function investigationCard(finding) {
+    const node = panel("Investigation", "investigation");
+    const attention = attentionFor(finding);
+    const running = investigating(finding);
     const saved = state.investigations[finding.id];
-    if (running) node.appendChild(el("p", "", "Running headless, read-only tools only. Takes a few minutes."));
+    if (attention && attention.kind === "failed") node.appendChild(el("p", "alert", "The last investigation failed: " + (attention.message || "unknown error")));
+    if (running) node.appendChild(el("p", "running-note", "Running headless, read-only tools only. Takes a few minutes. This page updates when it finishes."));
     if (saved) {
       node.appendChild(el("pre", "draft", saved.result || "(empty answer)"));
       const parts = [ago(saved.at)];
@@ -245,8 +385,8 @@
     return node;
   }
 
-  function knownBlock(finding) {
-    const node = block("Known issue");
+  function knownCard(finding) {
+    const node = panel("Known issue");
     const current = knownFor(finding);
     const form = el("div", "known-form");
     const select = el("select");
@@ -273,23 +413,15 @@
     ticket.setAttribute("aria-label", "Jira key");
     const save = el("button", "btn", "Save");
     save.type = "button";
-    save.addEventListener("click", async () => {
-      try {
-        await api("/api/known", { finding_id: finding.id, state: select.value, note: note.value, ticket: ticket.value });
-        toast("Saved");
-        await load();
-      } catch (error) {
-        toast(error.message);
-      }
-    });
+    save.addEventListener("click", () => act("Saved", () => api("/api/known", { finding_id: finding.id, state: select.value, note: note.value, ticket: ticket.value })));
     form.append(select, note, ticket, save);
     node.appendChild(form);
     node.appendChild(el("p", "note", "Stored on this machine only (" + (current ? "updated " + ago(current.updated_at) + " by " + current.by : "not marked") + ")."));
     return node;
   }
 
-  function actionsBlock(finding) {
-    const node = el("div", "actions");
+  function actionsBar(finding) {
+    const node = el("div", "actions-bar");
     const open = el("button", "btn primary", "Open in Claude Code");
     open.type = "button";
     open.disabled = !state.capabilities.launch || !state.capabilities.headless;
@@ -301,19 +433,11 @@
         toast(error.message);
       }
     });
-    const investigating = runningJobs().some((job) => job.kind === "investigate" && job.finding_id === finding.id);
-    const run = el("button", "btn", investigating ? "Investigating..." : state.investigations[finding.id] ? "Run again" : "Run investigation");
+    const running = investigating(finding);
+    const run = el("button", "btn", running ? "Investigating..." : state.investigations[finding.id] ? "Run again" : "Run investigation");
     run.type = "button";
-    run.disabled = investigating || !state.capabilities.headless;
-    run.addEventListener("click", async () => {
-      try {
-        await api("/api/investigate", { finding_id: finding.id });
-        toast("Investigation started");
-        await load();
-      } catch (error) {
-        toast(error.message);
-      }
-    });
+    run.disabled = running || !state.capabilities.headless;
+    run.addEventListener("click", () => act("Investigation started", () => api("/api/investigate", { finding_id: finding.id })));
     node.append(open, run);
     const saved = state.investigations[finding.id];
     if (saved && saved.session_id) {
@@ -332,129 +456,236 @@
     return node;
   }
 
-  function buildRow(finding) {
-    const row = el("details", "row");
-    row.dataset.id = finding.id;
-    row.open = openRows.has(finding.id);
-    row.addEventListener("toggle", () => { if (row.open) openRows.add(finding.id); else openRows.delete(finding.id); });
-
-    const summary = el("summary");
-    summary.appendChild(el("span", "pill " + finding.disposition, DISPOSITIONS[finding.disposition]));
-    const title = el("div", "title");
-    title.appendChild(el("b", "", finding.title));
-    const badges = el("div", "badges");
-    badges.appendChild(el("span", "mono", [finding.code, groupOf(finding)].filter(Boolean).join(" · ")));
-    if (finding.route) badges.appendChild(el("span", "", "route: " + finding.route));
-    const known = knownFor(finding);
-    if (known) badges.appendChild(el("span", "pill good", KNOWN_LABEL[known.state] + (known.ticket ? " " + known.ticket : "")));
-    if (state.investigations[finding.id]) badges.appendChild(el("span", "pill muted", "Investigated"));
-    if (state.sumo.available && finding.sumo) {
-      badges.appendChild(el("span", "pill muted", finding.sumo.total ? finding.sumo.total + " monitor" + (finding.sumo.total === 1 ? "" : "s") + " mention" : "No monitor mentions"));
+  function draftCard(finding) {
+    const draft = panel(finding.draft.title ? finding.draft.title : "Draft", "draft-card");
+    draft.appendChild(el("p", "note", { ops_handoff: "Ops handoff, not sent", ticket_draft: "Ticket draft, not created", biz_ops: "Biz-ops review, AI-chosen, not sent", dev_ticket: "Dev ticket, AI-chosen, not created" }[finding.draft.kind] || "Draft"));
+    draft.appendChild(el("pre", "draft", finding.draft.body));
+    const buttons = el("div", "actions");
+    const copy = el("button", "btn", "Copy draft");
+    copy.type = "button";
+    copy.addEventListener("click", () => copyText(finding.draft.body, "Draft"));
+    buttons.appendChild(copy);
+    if (finding.draft.meta.duplicate_search_jql) {
+      const jql = el("button", "btn", "Copy duplicate-check JQL");
+      jql.type = "button";
+      jql.addEventListener("click", () => copyText(finding.draft.meta.duplicate_search_jql, "JQL"));
+      buttons.appendChild(jql);
     }
-    title.appendChild(badges);
-    const figures = el("div", "figures");
-    figures.appendChild(el("span", "mono", finding.dollars != null ? money(finding.dollars) : finding.count + " " + finding.unit.replace(/^failed /, "")));
-    figures.appendChild(el("span", "mono", finding.dollars != null ? finding.count + " " + finding.unit.replace(/^failed /, "") : finding.window_days + " d window"));
-    summary.append(title, figures);
-    row.appendChild(summary);
+    draft.appendChild(buttons);
+    return draft;
+  }
 
-    const detail = el("div", "detail");
-    if (finding.summary) detail.appendChild(el("p", "", finding.summary));
-    detail.appendChild(actionsBlock(finding));
+  function renderFinding(page, id) {
+    const finding = state.report && state.report.findings.find((candidate) => candidate.id === id);
+    const back = el("a", "back", "← All findings");
+    back.href = "#/";
+    page.appendChild(back);
+    if (!finding) {
+      const empty = el("div", "empty");
+      empty.appendChild(el("b", "", "This finding is not in the current report"));
+      empty.appendChild(el("span", "", "A refresh replaces the report. Findings that stopped failing no longer appear."));
+      page.appendChild(empty);
+      return;
+    }
+    const attention = attentionFor(finding);
+    if (attention && openedSeen !== finding.id + attention.token) {
+      openedSeen = finding.id + attention.token;
+      api("/api/seen", { finding_id: finding.id }).then(() => load()).catch(() => {});
+    }
+
+    const hero = el("section", "hero " + finding.disposition);
+    const top = el("div", "hero-top");
+    const heading = el("div", "hero-heading");
+    const tags = el("div", "badges");
+    tags.appendChild(el("span", "pill " + finding.disposition, DISPOSITIONS[finding.disposition]));
+    tags.appendChild(el("span", "mono", [finding.code, groupOf(finding)].filter(Boolean).join(" · ")));
+    if (finding.route) tags.appendChild(el("span", "", "route: " + finding.route));
+    const known = knownFor(finding);
+    if (known) tags.appendChild(el("span", "pill good", KNOWN_LABEL[known.state] + (known.ticket ? " " + known.ticket : "")));
+    const monitors = monitorPill(finding);
+    if (monitors) tags.appendChild(monitors);
+    heading.append(tags, el("h1", "", finding.title));
+    const [main, sub] = figuresOf(finding);
+    const figures = el("div", "hero-figures");
+    figures.append(el("span", "big mono", main), el("span", "mono soft", sub));
+    top.append(pinButton(finding), heading, figures);
+    hero.appendChild(top);
+    page.appendChild(hero);
+
+    if (attention && attention.kind === "result") {
+      page.appendChild(el("div", "banner attn-banner", "The investigation finished. The result is in the Investigation section below."));
+    }
+
+    if (finding.summary) {
+      const what = panel("What happened", "what");
+      what.appendChild(el("p", "lead", finding.summary));
+      if (finding.highlights) what.appendChild(el("p", "mono soft", finding.highlights));
+      page.appendChild(what);
+    }
+    page.appendChild(actionsBar(finding));
 
     const cols = el("div", "cols");
     const facts = el("dl", "facts");
     fact(facts, "Signature", finding.key, true);
     fact(facts, "Error text", finding.error_text, false);
     fact(facts, "Size", finding.stat, false);
-    fact(facts, "Highlights", finding.highlights, true);
     fact(facts, "Next step from the service", finding.next_step, false);
     Object.keys(finding.helpful).forEach((source) => {
       const info = finding.helpful[source];
       if (info.found) fact(facts, "Helpful info (" + source + ")", info.text, false);
     });
-    const left = block("Details");
-    left.appendChild(facts);
-    cols.append(left, monitorsBlock(finding));
-    detail.appendChild(cols);
+    const details = panel("Details");
+    details.appendChild(facts);
+    cols.append(monitorsCard(finding), details);
+    page.appendChild(cols);
 
     if (finding.samples.length) {
-      const samples = block("Samples");
+      const samples = panel("Samples");
       samples.appendChild(table(finding.sample_columns, finding.samples));
-      detail.appendChild(samples);
+      page.appendChild(samples);
     }
-    if (finding.draft) {
-      const draft = block(finding.draft.title ? finding.draft.title : "Draft");
-      draft.appendChild(el("p", "note", { ops_handoff: "Ops handoff, not sent", ticket_draft: "Ticket draft, not created", biz_ops: "Biz-ops review, AI-chosen, not sent", dev_ticket: "Dev ticket, AI-chosen, not created" }[finding.draft.kind] || "Draft"));
-      draft.appendChild(el("pre", "draft", finding.draft.body));
-      const buttons = el("div", "actions");
-      const copy = el("button", "btn", "Copy draft");
-      copy.type = "button";
-      copy.addEventListener("click", () => copyText(finding.draft.body, "Draft"));
-      buttons.appendChild(copy);
-      if (finding.draft.meta.duplicate_search_jql) {
-        const jql = el("button", "btn", "Copy duplicate-check JQL");
-        jql.type = "button";
-        jql.addEventListener("click", () => copyText(finding.draft.meta.duplicate_search_jql, "JQL"));
-        buttons.appendChild(jql);
-      }
-      draft.appendChild(buttons);
-      detail.appendChild(draft);
-    }
+    if (finding.draft) page.appendChild(draftCard(finding));
     if (finding.log) {
-      const sub = el("details", "sub");
-      sub.appendChild(el("summary", "", "Log evidence (as returned by the service)"));
-      sub.appendChild(el("pre", "draft", finding.log));
-      detail.appendChild(sub);
+      const evidence = panel("Log evidence", "evidence");
+      evidence.appendChild(el("p", "note", "As returned by the service."));
+      evidence.appendChild(el("pre", "draft", finding.log));
+      page.appendChild(evidence);
     }
-    detail.appendChild(investigationBlock(finding));
-    detail.appendChild(knownBlock(finding));
-    row.appendChild(detail);
-    return row;
+    page.appendChild(investigationCard(finding));
+    page.appendChild(knownCard(finding));
   }
 
-  function renderList() {
-    const list = $("list");
-    list.replaceChildren();
-    if (!state.report) {
-      const empty = el("div", "empty");
-      empty.appendChild(el("b", "", "No report yet"));
-      empty.appendChild(el("span", "", "Refresh runs failure_triage headless (about 4 minutes, about $0.35). To load a saved run instead:"));
-      empty.appendChild(el("code", "mono", "python3 -m servicing_triage_ui import <file>"));
-      list.appendChild(empty);
-      return;
-    }
-    const findings = visibleFindings();
-    if (!findings.length) {
-      const hidden = state.report.findings.length - findings.length;
-      const empty = el("div", "empty");
-      empty.appendChild(el("b", "", "Nothing matches these filters"));
-      empty.appendChild(el("span", "", hidden + " findings are hidden by the filters or by Hide known."));
-      list.appendChild(empty);
-      return;
-    }
-    findings.forEach((finding) => list.appendChild(buildRow(finding)));
+  /* ---------- stats view ---------- */
+
+  function changeChip(row) {
+    if (!row.change_text) return null;
+    const percent = row.change_percent;
+    if (percent === null) return el("span", "delta flat", row.change_text);
+    if (percent === 0) return el("span", "delta flat", "same");
+    const up = percent > 0;
+    const tone = row.failure ? (up ? "bad" : "good") : "flat";
+    const chipNode = el("span", "delta " + tone, (up ? "▲ " : "▼ ") + Math.abs(percent) + "%");
+    chipNode.title = row.change_text;
+    return chipNode;
   }
 
-  function renderFooter() {
-    const parts = ["Data in " + "~/.servicing-triage-ui", "ids, amounts and error text only"];
+  function statsRow(row) {
+    const line = el("div", "stat-row" + (row.failure ? " failure" : ""));
+    line.appendChild(el("span", "stat-label", row.label));
+    const numbers = el("span", "stat-numbers");
+    numbers.appendChild(el("span", "stat-count mono", row.count === null ? row.raw : row.count.toLocaleString("en-US")));
+    if (row.dollars !== null) numbers.appendChild(el("span", "mono soft", money(row.dollars)));
+    line.appendChild(numbers);
+    const chipNode = changeChip(row);
+    line.appendChild(chipNode || el("span"));
+    const extra = el("div", "stat-extra");
+    row.breakdown.forEach((part) => extra.appendChild(el("span", "tag mono", part.name + " " + part.count)));
+    if (row.follow_up && row.count) {
+      const link = el("a", "follow", "Open failures");
+      link.href = "#/";
+      link.title = row.follow_up;
+      extra.appendChild(link);
+    }
+    if (extra.childNodes.length) line.appendChild(extra);
+    return line;
+  }
+
+  function renderStats(page) {
+    const stats = state.stats;
+    if (!stats) {
+      const empty = el("div", "empty");
+      empty.appendChild(el("b", "", "No stats yet"));
+      empty.appendChild(el("span", "", "Refresh stats runs daily_stats headless (under a minute, about $0.35)."));
+      page.appendChild(empty);
+      return;
+    }
+    const head = el("section", "stats-head");
+    head.append(el("h2", "", "Servicing stats for " + (stats.day || "the day") + " (UTC)"), el("span", "soft", "Change is against the day before. Fetched " + ago(stats.fetched_at) + "."));
+    page.appendChild(head);
+    const grid = el("div", "stat-grid");
+    stats.sections.forEach((section) => {
+      const card = el("section", "card stat-card" + (section.rows.some((row) => row.follow_up && row.count) ? " flagged" : ""));
+      card.appendChild(el("h2", "", section.name));
+      section.rows.forEach((row) => card.appendChild(statsRow(row)));
+      grid.appendChild(card);
+    });
+    page.appendChild(grid);
+    const unchecked = uncheckedPanel(stats.unchecked);
+    if (unchecked) page.appendChild(unchecked);
+    stats.notes.forEach((note) => page.appendChild(el("p", "note", note)));
+  }
+
+  /* ---------- chrome ---------- */
+
+  function renderChrome(route) {
+    const onStats = route.name === "stats";
+    $("tab-failures").classList.toggle("on", !onStats);
+    $("tab-stats").classList.toggle("on", onStats);
+    $("run-failures").hidden = onStats;
+    $("run-stats").hidden = !onStats;
+    const report = state.report;
+    const source = onStats ? state.stats : report;
+    if (onStats) {
+      $("meta").textContent = source ? "Fetched " + ago(source.fetched_at) : "No stats yet";
+    } else {
+      $("meta").textContent = report
+        ? "Last " + report.window_days + (report.window_days === 1 ? " day" : " days") + ", fetched " + ago(report.fetched_at) + " (" + report.source + ")"
+        : "No report yet";
+    }
+    const refreshing = runningJobs().some((job) => job.kind === "refresh");
+    const refresh = $("refresh");
+    refresh.disabled = refreshing || !state.capabilities.headless;
+    refresh.textContent = refreshing ? "Refreshing..." : "Refresh";
+    refresh.title = state.capabilities.headless ? "Runs failure_triage headless. About 4 minutes and about $0.35." : "claude CLI not found";
+    const statsRunning = runningJobs().some((job) => job.kind === "stats");
+    const statsButton = $("refresh-stats");
+    statsButton.disabled = statsRunning || !state.capabilities.headless;
+    statsButton.textContent = statsRunning ? "Refreshing..." : "Refresh stats";
+    const waiting = Object.keys(state.attention).length;
+    $("tab-failures").textContent = waiting ? "Failures (" + waiting + " to look at)" : "Failures";
+    document.title = (waiting ? "(" + waiting + ") " : "") + "Servicing Triage";
+    renderBanner();
+    const parts = ["Data in ~/.servicing-triage-ui", "ids, amounts and error text only"];
     if (state.sumo.available) parts.push("Sumo monitors: " + state.sumo.count + " from sumologic-config " + (state.sumo.sha || "") + " (" + (state.sumo.date || "") + ")");
     if (state.capabilities.dry_run) parts.push("DRY RUN: launch does not open a terminal");
     $("foot").textContent = parts.join(" · ");
   }
 
-  function renderView() {
-    renderFilters();
-    renderList();
+  function renderBanner() {
+    const banner = $("banner");
+    const running = runningJobs();
+    const failed = state.jobs.find((job) => job.status === "error" && job.kind !== "investigate" && Date.now() / 1000 - (job.finished || 0) < 600);
+    banner.replaceChildren();
+    banner.className = "banner";
+    if (running.length) {
+      running.forEach((job) => {
+        const seconds = Math.round(Date.now() / 1000 - job.started);
+        banner.appendChild(el("span", "", job.label + " running, " + seconds + " s. Headless runs take a few minutes."));
+      });
+      banner.hidden = false;
+    } else if (failed) {
+      banner.classList.add("error");
+      banner.appendChild(el("span", "", failed.label + " failed: " + failed.message));
+      banner.hidden = false;
+    } else {
+      banner.hidden = true;
+    }
   }
 
-  function render() {
-    renderMeta();
-    renderBanner();
-    renderSummary();
-    renderUnchecked();
-    renderView();
-    renderFooter();
+  function renderPage() {
+    const route = currentRoute();
+    const focused = document.activeElement && document.activeElement.id === "search";
+    const page = $("page");
+    page.replaceChildren();
+    renderChrome(route);
+    if (route.name === "stats") renderStats(page);
+    else if (route.name === "finding") renderFinding(page, route.id);
+    else renderList(page);
+    if (focused && $("search")) {
+      const search = $("search");
+      search.focus();
+      search.setSelectionRange(search.value.length, search.value.length);
+    }
   }
 
   async function load() {
@@ -464,29 +695,30 @@
       toast("Could not load state: " + error.message);
       return;
     }
-    const signature = JSON.stringify([state.report && state.report.fetched_at, state.known, state.investigations, state.jobs.map((job) => [job.id, job.status])]);
-    if (signature !== lastSignature) {
+    const signature = JSON.stringify([
+      state.report && state.report.fetched_at, state.stats && state.stats.fetched_at, state.known, state.investigations,
+      state.pins, state.attention, state.jobs.map((job) => [job.id, job.status])
+    ]);
+    const editing = document.activeElement && document.activeElement.closest("#page") && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName) && document.activeElement.id !== "search";
+    if (signature !== lastSignature && !editing) {
       lastSignature = signature;
-      render();
+      renderPage();
     } else {
-      renderMeta();
-      renderBanner();
+      renderChrome(currentRoute());
     }
     clearTimeout(pollTimer);
     if (runningJobs().length) pollTimer = setTimeout(load, 3000);
   }
 
-  $("refresh").addEventListener("click", async () => {
-    try {
-      await api("/api/refresh", { window_days: Number($("window").value) });
-      toast("Refresh started");
-      await load();
-    } catch (error) {
-      toast(error.message);
-    }
+  window.addEventListener("hashchange", () => {
+    if (!state) return;
+    lastSignature = "";
+    renderPage();
+    window.scrollTo(0, 0);
   });
-  $("search").addEventListener("input", (event) => { view.query = event.target.value; renderList(); });
-  $("hide-known").addEventListener("change", (event) => { view.hideKnown = event.target.checked; renderList(); });
+  $("page").addEventListener("focusout", () => setTimeout(load, 250));
+  $("refresh").addEventListener("click", () => act("Refresh started", () => api("/api/refresh", { window_days: Number($("window").value) })));
+  $("refresh-stats").addEventListener("click", () => act("Stats refresh started", () => api("/api/stats", { day: $("stats-day").value })));
   setInterval(() => { if (state && runningJobs().length) renderBanner(); }, 1000);
   load();
 })();

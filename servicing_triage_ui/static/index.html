@@ -14,7 +14,7 @@
         <h1>Servicing triage</h1>
         <p id="meta" class="soft"></p>
       </div>
-      <div class="run">
+      <div class="run" id="run-failures">
         <label for="window" class="soft">Window</label>
         <select id="window" aria-label="Days of failures to triage">
           <option value="1">1 day</option>
@@ -24,25 +24,23 @@
         </select>
         <button id="refresh" class="btn primary" type="button">Refresh</button>
       </div>
+      <div class="run" id="run-stats" hidden>
+        <label for="stats-day" class="soft">Day</label>
+        <select id="stats-day" aria-label="Day of stats">
+          <option value="yesterday" selected>Yesterday</option>
+          <option value="today">Today so far</option>
+        </select>
+        <button id="refresh-stats" class="btn primary" type="button">Refresh stats</button>
+      </div>
     </header>
 
+    <nav class="tabs" aria-label="Views">
+      <a id="tab-failures" href="#/">Failures</a>
+      <a id="tab-stats" href="#/stats">Daily stats</a>
+    </nav>
+
     <div id="banner" class="banner" role="status" hidden></div>
-    <section id="summary" class="summary" aria-label="Summary"></section>
-    <section id="unchecked" class="panel warn" aria-labelledby="unchecked-h" hidden>
-      <h2 id="unchecked-h">Sensors that did not run</h2>
-      <ul id="unchecked-list"></ul>
-    </section>
-
-    <section class="toolbar" aria-label="Filters">
-      <div class="chips" id="disposition-chips" role="group" aria-label="Who must act"></div>
-      <div class="chips" id="area-chips" role="group" aria-label="Area"></div>
-      <div class="tools">
-        <input id="search" type="search" placeholder="Search code, task or text" aria-label="Search findings">
-        <label class="check"><input id="hide-known" type="checkbox" checked> Hide known</label>
-      </div>
-    </section>
-
-    <main id="list" class="ledger" aria-label="Findings"></main>
+    <div id="page"></div>
     <footer id="foot" class="soft"></footer>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

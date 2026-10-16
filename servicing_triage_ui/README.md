@@ -17,6 +17,8 @@ Needs the `claude` CLI signed in with the servicing-plugin MCP server.
 
 ## What it does
 
+- Each finding has its own page (`#/f/<id>`). Pin a finding with the star to keep it at the top. A finished or failed headless investigation is highlighted, listed under "Needs your attention", and cleared once you open the finding.
+- **Daily stats** tab runs `daily_stats` headless (under a minute, about $0.35) and shows each section with the change against the day before. Failure rows link back to the failures list.
 - **Refresh** runs `failure_triage` headless (about 4 minutes, about $0.36 for one day).
 - **Investigate** runs a read-only headless session for one finding (about 6 minutes, about $0.54). The result is shown as model output, not a verified finding, and can be continued in Claude Code.
 - **Open in Claude Code** opens iTerm2 or Terminal with a prompt built server-side from the finding.

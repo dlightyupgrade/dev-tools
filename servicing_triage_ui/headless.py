@@ -16,6 +16,7 @@ from .parser import parse_report
 
 PREFIX = "mcp__plugin_servicing-plugin_servicing-agent__"
 TRIAGE_TOOL = PREFIX + "failure_triage"
+STATS_TOOL = PREFIX + "daily_stats"
 READ_ONLY_TOOLS = [PREFIX + name for name in ("search_runbooks", "query_redshift", "search_logs", "investigate", "daily_stats", "failure_triage")]
 SAVED = re.compile(r"saved to (\S+\.txt)")
 TOOL_RESULTS_ROOT = Path.home() / ".claude" / "projects"
@@ -65,10 +66,10 @@ def _events(stdout: str) -> list[dict]:
     return events
 
 
-def run_triage(claude_bin: str, window_days: int, timeout: int, budget_usd: float) -> dict:
-    prompt = f"Call the failure_triage tool once with window_days {window_days} and output_format text. Then reply with only the word done."
+def run_tool_text(claude_bin: str, tool: str, prompt: str, timeout: int, budget_usd: float) -> tuple[str, dict]:
+    """Runs one MCP tool headless and returns the tool's own output text plus the final event."""
     completed = subprocess.run(
-        [claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose", "--allowedTools", TRIAGE_TOOL,
+        [claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose", "--allowedTools", tool,
          "--max-budget-usd", str(budget_usd), "--no-session-persistence"],
         capture_output=True, text=True, timeout=timeout, check=False,
     )
@@ -81,16 +82,28 @@ def run_triage(claude_bin: str, window_days: int, timeout: int, budget_usd: floa
         if not isinstance(content, list):
             continue
         for block in content:
-            if event.get("type") == "assistant" and block.get("type") == "tool_use" and block.get("name") == TRIAGE_TOOL:
+            if event.get("type") == "assistant" and block.get("type") == "tool_use" and block.get("name") == tool:
                 tool_use_id = block.get("id")
             elif event.get("type") == "user" and block.get("type") == "tool_result" and tool_use_id and block.get("tool_use_id") == tool_use_id:
                 text = triage_text(block.get("content"))
     final = next((e for e in reversed(events) if e.get("type") == "result"), {})
     if text is None:
-        raise HeadlessError(final.get("result") or "failure_triage was not called (exit %s)" % completed.returncode)
+        raise HeadlessError(final.get("result") or "%s was not called (exit %s)" % (tool.rsplit("__", 1)[-1], completed.returncode))
+    return text, final
+
+
+def run_triage(claude_bin: str, window_days: int, timeout: int, budget_usd: float) -> dict:
+    prompt = f"Call the failure_triage tool once with window_days {window_days} and output_format text. Then reply with only the word done."
+    text, final = run_tool_text(claude_bin, TRIAGE_TOOL, prompt, timeout, budget_usd)
     report = parse_report(text)
     report["run"] = {"cost_usd": final.get("total_cost_usd"), "duration_ms": final.get("duration_ms")}
     return report
+
+
+def run_stats(claude_bin: str, day: str, timeout: int, budget_usd: float) -> dict:
+    prompt = f"Call the daily_stats tool once with day {day} and output_format text. Then reply with only the word done."
+    text, final = run_tool_text(claude_bin, STATS_TOOL, prompt, timeout, budget_usd)
+    return {"text": text, "run": {"cost_usd": final.get("total_cost_usd"), "duration_ms": final.get("duration_ms")}}
 
 
 def run_investigation(claude_bin: str, prompt: str, timeout: int, budget_usd: float) -> dict:
