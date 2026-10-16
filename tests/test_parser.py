@@ -102,9 +102,18 @@ def test_report_without_findings_parses():
 def test_parse_sample_kinds():
     assert parse_sample("- not a sample") is None
     kind, cells = parse_sample("- account 1 | 2 loan(s) in this group | last bill due none in 120 days | spectrum")
-    assert kind == "billing" and cells[0] == "1"
+    assert kind == "billing" and cells == ["1", "2", "none in 120 days", "spectrum"]
 
 
 def test_unchecked_reason_falls_back_to_a_trimmed_line():
     assert summarize_unchecked("boom\n  with detail " + "x" * 400).startswith("boom with detail")
     assert len(summarize_unchecked("y" * 400)) == 160
+
+
+def test_billing_samples_note_totals_the_loans():
+    from servicing_triage_ui.parser import _samples_note
+
+    rows = [["1", "4", "none in 120 days", "spectrum_b"], ["2", "1", "2026-08-27", "spectrum"]]
+    assert _samples_note("billing", rows, 5) == "2 accounts listed, 5 unbilled loans in total"
+    assert _samples_note("billing", rows, 9).endswith("(the service counts 9)")
+    assert _samples_note("payment", rows, 5) == ""

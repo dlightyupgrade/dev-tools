@@ -542,6 +542,7 @@
     if (finding.samples.length) {
       const samples = panel("Samples");
       samples.appendChild(table(finding.sample_columns, finding.samples));
+      if (finding.samples_note) samples.appendChild(el("p", "note", finding.samples_note));
       page.appendChild(samples);
     }
     if (finding.draft) page.appendChild(draftCard(finding));

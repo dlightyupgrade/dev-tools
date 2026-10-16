@@ -63,7 +63,8 @@ def parse_sample(line: str) -> tuple[str, list[str]] | None:
             cells[4], _strip(cells[5], "failed ").removesuffix(" UTC"), cells[6],
         ]
     if first.startswith("account ") and len(cells) >= 4:
-        return "billing", [_strip(first, "account "), cells[1], cells[2], cells[3]]
+        loans = re.match(r"(\d+) loan", cells[1])
+        return "billing", [_strip(first, "account "), loans.group(1) if loans else cells[1], _strip(cells[2], "last bill due "), cells[3]]
     if len(cells) >= 7 and cells[3].startswith("latest task "):
         return "task", [
             cells[0], cells[1], cells[2], _strip(cells[3], "latest task "), _strip(cells[4], "retries "),
@@ -74,7 +75,7 @@ def parse_sample(line: str) -> tuple[str, list[str]] | None:
 
 SAMPLE_COLUMNS = {
     "payment": ["Request", "Loan", "Amount", "Effective", "Provider / input set", "Failed (UTC)", "State"],
-    "billing": ["Account", "Loans in group", "Last bill due", "Shard"],
+    "billing": ["Account", "Unbilled loans in this group", "Last bill due", "Shard"],
     "task": ["Task", "Status", "Tasks", "Latest task", "Retries", "Last failed (UTC)", "Schema"],
     "other": ["Detail"],
 }
@@ -147,6 +148,15 @@ def _samples(outputs: list[dict], highlights: str) -> tuple[str, list[list[str]]
 
 SAMPLE_COLUMNS["ids"] = ["Request", "Amount"]
 SAMPLE_COLUMNS["none"] = []
+
+
+def _samples_note(kind: str, samples: list[list[str]], total: int) -> str:
+    if kind != "billing" or not samples or not all(row[1].isdigit() for row in samples):
+        return ""
+    shown = sum(int(row[1]) for row in samples)
+    rows = len(samples)
+    return f"{rows} account{'s' if rows != 1 else ''} listed, {shown} unbilled loan{'s' if shown != 1 else ''} in total" + (
+        "" if shown == total else f" (the service counts {total})")
 
 
 def _code(*texts: str) -> str:
@@ -246,6 +256,7 @@ def parse_finding(lines: list[str], window_days: int) -> dict:
         "sample_kind": sample_kind,
         "sample_columns": SAMPLE_COLUMNS[sample_kind],
         "samples": samples,
+        "samples_note": _samples_note(sample_kind, samples, int(counted.group(1)) if counted else 0),
         "draft": {"kind": primary["kind"], "note": primary["note"], "title": primary["title"], "body": primary["body"], "meta": primary["meta"]} if primary else None,
     }
 
