@@ -63,7 +63,7 @@ def test_billing_finding_uses_billing_samples(report):
     billing = by_key(report, "billing:unbilled-open-loans:delinquent")
     assert billing["count"] == 271
     assert billing["dollars"] is None
-    assert billing["sample_kind"] == "billing"
+    assert billing["sample_kind"] == "billing_group"
     assert billing["title"].startswith("Unbilled open loans:")
 
 
@@ -102,7 +102,8 @@ def test_report_without_findings_parses():
 def test_parse_sample_kinds():
     assert parse_sample("- not a sample") is None
     kind, cells = parse_sample("- account 1 | 2 loan(s) in this group | last bill due none in 120 days | spectrum")
-    assert kind == "billing" and cells == ["1", "2", "none in 120 days", "spectrum"]
+    assert kind == "billing_group" and cells == ["1", "2", "none in 120 days", "spectrum"]
+    assert parse_sample("- loan 5 | last bill due 2026-08-27 | spectrum") == ("billing", ["5", "2026-08-27", "spectrum"])
 
 
 def test_unchecked_reason_falls_back_to_a_trimmed_line():
@@ -110,10 +111,12 @@ def test_unchecked_reason_falls_back_to_a_trimmed_line():
     assert len(summarize_unchecked("y" * 400)) == 160
 
 
-def test_billing_samples_note_totals_the_loans():
+def test_billing_samples_notes():
     from servicing_triage_ui.parser import _samples_note
 
-    rows = [["1", "4", "none in 120 days", "spectrum_b"], ["2", "1", "2026-08-27", "spectrum"]]
-    assert _samples_note("billing", rows, 5) == "2 accounts listed, 5 unbilled loans in total"
-    assert _samples_note("billing", rows, 9).endswith("(the service counts 9)")
-    assert _samples_note("payment", rows, 5) == ""
+    listed = [["1", "none in 120 days", "spectrum_b"], ["2", "2026-08-27", "spectrum"]]
+    assert _samples_note("billing", listed, 2) == "All 2 loans listed, oldest bill first."
+    assert _samples_note("billing", listed, 9) == "2 of 9 loans listed."
+    groups = [["1", "4", "none in 120 days", "spectrum_b"], ["2", "1", "2026-08-27", "spectrum"]]
+    assert "2 of 5 loans" in _samples_note("billing_group", groups, 5)
+    assert _samples_note("payment", listed, 5) == ""

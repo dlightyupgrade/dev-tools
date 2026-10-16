@@ -62,9 +62,11 @@ def parse_sample(line: str) -> tuple[str, list[str]] | None:
             _strip(first, "request "), _strip(cells[1], "loan "), cells[2], _strip(cells[3], "effective "),
             cells[4], _strip(cells[5], "failed ").removesuffix(" UTC"), cells[6],
         ]
+    if first.startswith("loan ") and len(cells) >= 3 and cells[1].startswith("last bill due"):
+        return "billing", [_strip(first, "loan "), _strip(cells[1], "last bill due "), cells[2]]
     if first.startswith("account ") and len(cells) >= 4:
         loans = re.match(r"(\d+) loan", cells[1])
-        return "billing", [_strip(first, "account "), loans.group(1) if loans else cells[1], _strip(cells[2], "last bill due "), cells[3]]
+        return "billing_group", [_strip(first, "account "), loans.group(1) if loans else cells[1], _strip(cells[2], "last bill due "), cells[3]]
     if len(cells) >= 7 and cells[3].startswith("latest task "):
         return "task", [
             cells[0], cells[1], cells[2], _strip(cells[3], "latest task "), _strip(cells[4], "retries "),
@@ -75,7 +77,8 @@ def parse_sample(line: str) -> tuple[str, list[str]] | None:
 
 SAMPLE_COLUMNS = {
     "payment": ["Request", "Loan", "Amount", "Effective", "Provider / input set", "Failed (UTC)", "State"],
-    "billing": ["Account", "Unbilled loans in this group", "Last bill due", "Shard"],
+    "billing": ["Loan", "Last bill due", "Shard"],
+    "billing_group": ["Oldest loan in the group", "Loans in the group", "Last bill due", "Shard"],
     "task": ["Task", "Status", "Tasks", "Latest task", "Retries", "Last failed (UTC)", "Schema"],
     "other": ["Detail"],
 }
@@ -151,12 +154,15 @@ SAMPLE_COLUMNS["none"] = []
 
 
 def _samples_note(kind: str, samples: list[list[str]], total: int) -> str:
-    if kind != "billing" or not samples or not all(row[1].isdigit() for row in samples):
-        return ""
-    shown = sum(int(row[1]) for row in samples)
-    rows = len(samples)
-    return f"{rows} account{'s' if rows != 1 else ''} listed, {shown} unbilled loan{'s' if shown != 1 else ''} in total" + (
-        "" if shown == total else f" (the service counts {total})")
+    if kind == "billing" and samples:
+        return f"All {len(samples)} loans listed, oldest bill first." if len(samples) == total else f"{len(samples)} of {total} loans listed."
+    if kind == "billing_group" and samples and all(row[1].isdigit() for row in samples):
+        groups = len(samples)
+        return (
+            f"This service version names only the oldest loan of each group ({groups} of {sum(int(row[1]) for row in samples)} loans). "
+            "The other loans in a group are not named."
+        )
+    return ""
 
 
 def _code(*texts: str) -> str:
